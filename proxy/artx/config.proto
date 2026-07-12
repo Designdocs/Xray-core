@@ -13,9 +13,15 @@ message Account {
   string psk = 1;
 }
 
+message FallbackConfig {
+  bool enabled = 1;
+  string origin = 2;
+}
+
 message ServerConfig {
   repeated xray.common.protocol.User users = 1;
   xray.transport.internet.tls.Config tls_settings = 2;
   uint32 wire_version = 3;
   uint32 profile_version = 4;
+  FallbackConfig fallback = 5;
 }

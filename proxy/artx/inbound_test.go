@@ -71,6 +71,156 @@ func TestArtXAuthenticationBindsTLSExporterAndRejectsReplay(t *testing.T) {
 	}
 }
 
+func TestArtXPreAuthFailuresUseUnifiedFallback(t *testing.T) {
+	tests := []struct {
+		name           string
+		payload        func(*testing.T, *Server, *tls.Conn) []byte
+		closeAfterSend bool
+		replayRejected bool
+	}{
+		{name: "unexpected type", payload: func(_ *testing.T, _ *Server, _ *tls.Conn) []byte {
+			return []byte{0x02, MinSaltLength}
+		}},
+		{name: "truncated auth", closeAfterSend: true, payload: func(_ *testing.T, _ *Server, _ *tls.Conn) []byte {
+			return []byte{AuthFrameType, MinSaltLength, 0x01}
+		}},
+		{name: "invalid salt", payload: func(_ *testing.T, _ *Server, _ *tls.Conn) []byte {
+			return []byte{AuthFrameType, MinSaltLength - 1}
+		}},
+		{name: "truncated padding", closeAfterSend: true, payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			encoded := validAuthPayload(t, client, "test-psk", uint32(server.now().Unix()/bucketSeconds))
+			return encoded[:len(encoded)-1]
+		}},
+		{name: "unknown locator", payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			return validAuthPayload(t, client, "unknown-psk", uint32(server.now().Unix()/bucketSeconds))
+		}},
+		{name: "bad tag", payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			encoded := validAuthPayload(t, client, "test-psk", uint32(server.now().Unix()/bucketSeconds))
+			encoded[2+MinSaltLength+UserLocatorLength+4] ^= 0xff
+			return encoded
+		}},
+		{name: "past bucket", payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			return validAuthPayload(t, client, "test-psk", uint32(server.now().Unix()/bucketSeconds)-2)
+		}},
+		{name: "future bucket", payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			return validAuthPayload(t, client, "test-psk", uint32(server.now().Unix()/bucketSeconds)+2)
+		}},
+		{name: "replay", replayRejected: true, payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			encoded := validAuthPayload(t, client, "test-psk", uint32(server.now().Unix()/bucketSeconds))
+			state := client.ConnectionState()
+			exporter, err := state.ExportKeyingMaterial(exporterLabel, nil, ExporterLength)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame, err := ReadAuthFrame(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.authenticate(frame, exporter); err != nil {
+				t.Fatal(err)
+			}
+			return encoded
+		}},
+		{name: "replay cache full", replayRejected: true, payload: func(t *testing.T, server *Server, client *tls.Conn) []byte {
+			server.replay.capacity = 0
+			return validAuthPayload(t, client, "test-psk", uint32(server.now().Unix()/bucketSeconds))
+		}},
+		{name: "garbage", payload: func(_ *testing.T, _ *Server, _ *tls.Conn) []byte {
+			return []byte("garbage")
+		}},
+		{name: "half close", closeAfterSend: true, payload: func(_ *testing.T, _ *Server, _ *tls.Conn) []byte {
+			return nil
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newArtXTestServer(t)
+			fallback := &recordingFallback{}
+			server.fallback = fallback
+			dispatcher := &countingRejectingDispatcher{}
+			clientRaw, serverRaw := stdnet.Pipe()
+			processDone := make(chan error, 1)
+			go func() {
+				processDone <- server.Process(testInboundContext(), xnet.Network_TCP, serverRaw, dispatcher)
+			}()
+			client := tls.Client(clientRaw, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) //nolint:gosec -- self-signed test certificate
+			if err := client.Handshake(); err != nil {
+				t.Fatal(err)
+			}
+			payload := test.payload(t, server, client)
+			if len(payload) > 0 {
+				if _, err := client.Write(payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.closeAfterSend {
+				closeTLSNow(client)
+			}
+			select {
+			case err := <-processDone:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("pre-auth failure did not reach fallback")
+			}
+			closeTLSNow(client)
+			if calls := dispatcher.Calls(); calls != 0 {
+				t.Fatalf("dispatcher calls = %d", calls)
+			}
+			if calls := fallback.Calls(); calls != 1 {
+				t.Fatalf("fallback calls = %d", calls)
+			}
+			if captured := fallback.PrefixLength(); captured > maxAuthFrameSize {
+				t.Fatalf("captured prefix = %d", captured)
+			}
+			stats := server.Stats()
+			if stats.ActiveConnections != 0 || stats.TotalConnections != 1 || stats.AuthenticationFailure != 1 || stats.FallbackHits != 1 || stats.FallbackErrors != 0 {
+				t.Fatalf("stats = %#v", stats)
+			}
+			wantReplay := uint64(0)
+			if test.replayRejected {
+				wantReplay = 1
+			}
+			if stats.ReplayRejected != wantReplay {
+				t.Fatalf("replay rejected = %d, want %d", stats.ReplayRejected, wantReplay)
+			}
+		})
+	}
+}
+
+func TestArtXRuntimeStatsCountsSuccessfulAuthentication(t *testing.T) {
+	server := newArtXTestServer(t)
+	client, processDone := authenticateArtXClient(t, server, &rejectingDispatcher{}, context.Background())
+	stats := server.Stats()
+	if stats.ActiveConnections != 1 || stats.TotalConnections != 1 || stats.AuthenticationSuccess != 1 || stats.AuthenticationFailure != 0 {
+		t.Fatalf("stats during connection = %#v", stats)
+	}
+	closeTLSNow(client)
+	<-processDone
+	if stats := server.Stats(); stats.ActiveConnections != 0 {
+		t.Fatalf("stats after connection = %#v", stats)
+	}
+}
+
+func validAuthPayload(t *testing.T, client *tls.Conn, psk string, bucket uint32) []byte {
+	t.Helper()
+	state := client.ConnectionState()
+	exporter, err := state.ExportKeyingMaterial(exporterLabel, nil, ExporterLength)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := NewAuthFrame([]byte(psk), bytes.Repeat([]byte{4}, MinSaltLength), exporter, bucket, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := frame.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func TestArtXSettingsAndFlowWindowValidation(t *testing.T) {
 	settings := settingsForProfile(7)
 	if err := validatePeerSettings(settings, 7); err != nil {
@@ -665,6 +815,51 @@ type rejectingDispatcher struct{ testDispatcher }
 
 func (rejectingDispatcher) Dispatch(context.Context, xnet.Destination) (*transport.Link, error) {
 	return nil, errors.New("unexpected dispatch")
+}
+
+type countingRejectingDispatcher struct {
+	rejectingDispatcher
+	mu    sync.Mutex
+	calls int
+}
+
+func (dispatcher *countingRejectingDispatcher) Dispatch(context.Context, xnet.Destination) (*transport.Link, error) {
+	dispatcher.mu.Lock()
+	dispatcher.calls++
+	dispatcher.mu.Unlock()
+	return nil, errors.New("unexpected dispatch")
+}
+
+func (dispatcher *countingRejectingDispatcher) Calls() int {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	return dispatcher.calls
+}
+
+type recordingFallback struct {
+	mu           sync.Mutex
+	calls        int
+	prefixLength int
+}
+
+func (fallback *recordingFallback) Serve(_ context.Context, _ stdnet.Conn, prefix []byte) error {
+	fallback.mu.Lock()
+	defer fallback.mu.Unlock()
+	fallback.calls++
+	fallback.prefixLength = len(prefix)
+	return nil
+}
+
+func (fallback *recordingFallback) Calls() int {
+	fallback.mu.Lock()
+	defer fallback.mu.Unlock()
+	return fallback.calls
+}
+
+func (fallback *recordingFallback) PrefixLength() int {
+	fallback.mu.Lock()
+	defer fallback.mu.Unlock()
+	return fallback.prefixLength
 }
 
 func newEchoDispatcher() (io.Closer, routing.Dispatcher) {

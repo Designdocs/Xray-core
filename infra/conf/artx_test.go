@@ -1,6 +1,7 @@
 package conf
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xtls/xray-core/proxy/artx"
@@ -31,6 +32,65 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 	account, ok := user.Account.(*artx.MemoryAccount)
 	if !ok || account.PSK != "secret" || user.Email != "user@example.com" || user.Level != 2 {
 		t.Fatalf("user = %#v", user)
+	}
+}
+
+func TestArtXInboundConfigBuildsFallback(t *testing.T) {
+	config := &ArtXServerConfig{
+		Users:          []*ArtXUser{{PSK: "secret"}},
+		TLSSettings:    &TLSConfig{},
+		WireVersion:    1,
+		ProfileVersion: 7,
+		Fallback: &ArtXFallbackConfig{
+			Enabled: true,
+			Origin:  "http://127.0.0.1:60443/",
+		},
+	}
+	built, err := config.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := built.(*artx.ServerConfig)
+	if server.Fallback == nil || !server.Fallback.Enabled || server.Fallback.Origin != "http://127.0.0.1:60443/" {
+		t.Fatalf("fallback = %#v", server.Fallback)
+	}
+}
+
+func TestArtXInboundConfigValidatesFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		fallback *ArtXFallbackConfig
+		wantErr  string
+	}{
+		{name: "missing", fallback: nil},
+		{name: "disabled", fallback: &ArtXFallbackConfig{}},
+		{name: "http", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "http://127.0.0.1:60443/"}},
+		{name: "https", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "https://origin.example.com/"}},
+		{name: "localhost cleartext", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "http://localhost:60443/"}, wantErr: "loopback"},
+		{name: "external cleartext", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "http://192.0.2.1/"}, wantErr: "loopback"},
+		{name: "enabled without origin", fallback: &ArtXFallbackConfig{Enabled: true}, wantErr: "origin required"},
+		{name: "unsupported scheme", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "ftp://origin.example.com/"}, wantErr: "http or https"},
+		{name: "missing host", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "https:///path"}, wantErr: "host required"},
+		{name: "credentials", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "https://user:pass@origin.example.com/"}, wantErr: "credentials"},
+		{name: "fragment", fallback: &ArtXFallbackConfig{Enabled: true, Origin: "https://origin.example.com/#fragment"}, wantErr: "fragment"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := &ArtXServerConfig{
+				Users:          []*ArtXUser{{PSK: "secret"}},
+				TLSSettings:    &TLSConfig{},
+				WireVersion:    1,
+				ProfileVersion: 1,
+				Fallback:       test.fallback,
+			}
+			_, err := config.Build()
+			if test.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("Build() error = %v, want containing %q", err, test.wantErr)
+			}
+		})
 	}
 }
 

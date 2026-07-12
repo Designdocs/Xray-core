@@ -18,10 +18,16 @@ type ArtXUser struct {
 }
 
 type ArtXServerConfig struct {
-	Users          []*ArtXUser `json:"users"`
-	TLSSettings    *TLSConfig  `json:"tlsSettings"`
-	WireVersion    uint32      `json:"wireVersion"`
-	ProfileVersion uint32      `json:"profileVersion"`
+	Users          []*ArtXUser         `json:"users"`
+	TLSSettings    *TLSConfig          `json:"tlsSettings"`
+	WireVersion    uint32              `json:"wireVersion"`
+	ProfileVersion uint32              `json:"profileVersion"`
+	Fallback       *ArtXFallbackConfig `json:"fallback"`
+}
+
+type ArtXFallbackConfig struct {
+	Enabled bool   `json:"enabled"`
+	Origin  string `json:"origin"`
 }
 
 func (config *ArtXServerConfig) Build() (proto.Message, error) {
@@ -43,6 +49,18 @@ func (config *ArtXServerConfig) Build() (proto.Message, error) {
 		WireVersion:    config.WireVersion,
 		ProfileVersion: config.ProfileVersion,
 		Users:          make([]*protocol.User, 0, len(config.Users)),
+	}
+	if config.Fallback != nil {
+		origin := strings.TrimSpace(config.Fallback.Origin)
+		if config.Fallback.Enabled && origin == "" {
+			return nil, errors.New("ARTX: fallback origin required when enabled")
+		}
+		if origin != "" {
+			if err := artx.ValidateFallbackOrigin(origin); err != nil {
+				return nil, errors.New("ARTX: invalid fallback origin").Base(err)
+			}
+		}
+		built.Fallback = &artx.FallbackConfig{Enabled: config.Fallback.Enabled, Origin: origin}
 	}
 	for _, user := range config.Users {
 		if user == nil || strings.TrimSpace(user.PSK) == "" {

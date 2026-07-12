@@ -36,6 +36,8 @@ type Server struct {
 
 	tlsConfig      *tls.Config
 	replay         *replayCache
+	fallback       FallbackHandler
+	stats          runtimeCounters
 	profileVersion uint32
 	now            func() time.Time
 }
@@ -64,11 +66,19 @@ func NewServer(_ context.Context, config *ServerConfig) (*Server, error) {
 	tlsConfig.MinVersion = tls.VersionTLS13
 	tlsConfig.MaxVersion = tls.VersionTLS13
 	tlsConfig.SessionTicketsDisabled = true
+	tlsConfig.NextProtos = appendUnique(tlsConfig.NextProtos, "h2", "http/1.1")
 	server := &Server{
 		tlsConfig:      tlsConfig,
 		replay:         newReplayCache(replayCacheCapacity, replayCacheTTL, time.Now),
 		profileVersion: config.ProfileVersion,
 		now:            time.Now,
+	}
+	if config.Fallback != nil && config.Fallback.Enabled {
+		fallback, err := NewHTTPFallback(config.Fallback.Origin)
+		if err != nil {
+			return nil, fmt.Errorf("artx: invalid fallback: %w", err)
+		}
+		server.fallback = fallback
 	}
 	server.replay.now = func() time.Time { return server.now() }
 	for _, configuredUser := range config.Users {
@@ -94,6 +104,9 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if connection == nil || dispatcher == nil {
 		return errors.New("artx: connection and dispatcher are required")
 	}
+	s.stats.totalConnections.Add(1)
+	s.stats.activeConnections.Add(1)
+	defer s.stats.activeConnections.Add(^uint64(0))
 	stopContextClose := context.AfterFunc(ctx, func() { closeTransport(connection) })
 	defer func() {
 		stopContextClose()
@@ -108,20 +121,22 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	}
 	state := tlsConnection.ConnectionState()
 	if state.Version != tls.VersionTLS13 {
-		return errors.New("artx: TLS 1.3 is required")
+		return s.handlePreAuthFailure(ctx, tlsConnection, nil, errors.New("artx: TLS 1.3 is required"))
 	}
 	exporter, err := state.ExportKeyingMaterial(exporterLabel, nil, ExporterLength)
 	if err != nil {
-		return fmt.Errorf("artx: TLS exporter: %w", err)
+		return s.handlePreAuthFailure(ctx, tlsConnection, nil, fmt.Errorf("artx: TLS exporter: %w", err))
 	}
-	auth, err := ReadAuthFrame(tlsConnection)
+	capture := newBoundedCapture(maxAuthFrameSize)
+	auth, err := ReadAuthFrame(io.TeeReader(tlsConnection, capture))
 	if err != nil {
-		return fmt.Errorf("artx: auth: %w", err)
+		return s.handlePreAuthFailure(ctx, tlsConnection, capture.Bytes(), fmt.Errorf("artx: auth: %w", err))
 	}
 	user, err := s.authenticate(auth, exporter)
 	if err != nil {
-		return err
+		return s.handlePreAuthFailure(ctx, tlsConnection, capture.Bytes(), err)
 	}
+	s.stats.authenticationSuccess.Add(1)
 	_ = connection.SetDeadline(time.Time{})
 
 	if inbound := session.InboundFromContext(ctx); inbound != nil {
@@ -165,6 +180,43 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 		return fmt.Errorf("artx: dispatch: %w", err)
 	}
 	return relaySingleStream(ctx, tlsConnection, writer, link)
+}
+
+func (s *Server) Stats() RuntimeStats {
+	return s.stats.snapshot()
+}
+
+func (s *Server) handlePreAuthFailure(ctx context.Context, connection *tls.Conn, prefix []byte, authErr error) error {
+	s.stats.authenticationFailure.Add(1)
+	if errors.Is(authErr, errReplay) || errors.Is(authErr, errReplayCacheFull) {
+		s.stats.replayRejected.Add(1)
+	}
+	if s.fallback == nil {
+		return authErr
+	}
+	s.stats.fallbackHits.Add(1)
+	_ = connection.SetDeadline(time.Time{})
+	if err := s.fallback.Serve(ctx, connection, prefix); err != nil {
+		s.stats.fallbackErrors.Add(1)
+		return fmt.Errorf("artx: fallback failed: %w", err)
+	}
+	return nil
+}
+
+func appendUnique(values []string, additions ...string) []string {
+	for _, addition := range additions {
+		found := false
+		for _, value := range values {
+			if value == addition {
+				found = true
+				break
+			}
+		}
+		if !found {
+			values = append(values, addition)
+		}
+	}
+	return values
 }
 
 func (s *Server) authenticate(frame AuthFrame, exporter []byte) (*protocol.MemoryUser, error) {
