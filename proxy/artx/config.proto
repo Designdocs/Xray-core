@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package xray.proxy.artx;
+option csharp_namespace = "Xray.Proxy.ArtX";
+option go_package = "github.com/xtls/xray-core/proxy/artx";
+option java_package = "com.xray.proxy.artx";
+option java_multiple_files = true;
+
+import "common/protocol/user.proto";
+import "transport/internet/tls/config.proto";
+
+message Account {
+  string psk = 1;
+}
+
+message ServerConfig {
+  repeated xray.common.protocol.User users = 1;
+  xray.transport.internet.tls.Config tls_settings = 2;
+  uint32 wire_version = 3;
+  uint32 profile_version = 4;
+}
