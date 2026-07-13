@@ -15,7 +15,9 @@ import (
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
+	featurestats "github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	transporttls "github.com/xtls/xray-core/transport/internet/tls"
@@ -42,7 +44,7 @@ type Server struct {
 	now            func() time.Time
 }
 
-func NewServer(_ context.Context, config *ServerConfig) (*Server, error) {
+func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config == nil || config.TlsSettings == nil || len(config.TlsSettings.Certificate) == 0 {
 		return nil, errors.New("artx: TLS certificate is required")
 	}
@@ -72,6 +74,9 @@ func NewServer(_ context.Context, config *ServerConfig) (*Server, error) {
 		replay:         newReplayCache(replayCacheCapacity, replayCacheTTL, time.Now),
 		profileVersion: config.ProfileVersion,
 		now:            time.Now,
+	}
+	if instance := core.FromContext(ctx); instance != nil {
+		server.stats.manager, _ = instance.GetFeature(featurestats.ManagerType()).(featurestats.Manager)
 	}
 	if config.Fallback != nil && config.Fallback.Enabled {
 		fallback, err := NewHTTPFallback(config.Fallback.Origin)
@@ -104,9 +109,12 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if connection == nil || dispatcher == nil {
 		return errors.New("artx: connection and dispatcher are required")
 	}
-	s.stats.totalConnections.Add(1)
-	s.stats.activeConnections.Add(1)
-	defer s.stats.activeConnections.Add(^uint64(0))
+	if inbound := session.InboundFromContext(ctx); inbound != nil {
+		s.stats.bind(inbound.Tag)
+	}
+	s.stats.add(runtimeCounterTotalConnections, 1)
+	s.stats.add(runtimeCounterActiveConnections, 1)
+	defer s.stats.add(runtimeCounterActiveConnections, -1)
 	stopContextClose := context.AfterFunc(ctx, func() { closeTransport(connection) })
 	defer func() {
 		stopContextClose()
@@ -136,7 +144,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if err != nil {
 		return s.handlePreAuthFailure(ctx, tlsConnection, capture.Bytes(), err)
 	}
-	s.stats.authenticationSuccess.Add(1)
+	s.stats.add(runtimeCounterAuthenticationSuccess, 1)
 	_ = connection.SetDeadline(time.Time{})
 
 	if inbound := session.InboundFromContext(ctx); inbound != nil {
@@ -187,17 +195,17 @@ func (s *Server) Stats() RuntimeStats {
 }
 
 func (s *Server) handlePreAuthFailure(ctx context.Context, connection *tls.Conn, prefix []byte, authErr error) error {
-	s.stats.authenticationFailure.Add(1)
+	s.stats.add(runtimeCounterAuthenticationFailure, 1)
 	if errors.Is(authErr, errReplay) || errors.Is(authErr, errReplayCacheFull) {
-		s.stats.replayRejected.Add(1)
+		s.stats.add(runtimeCounterReplayRejected, 1)
 	}
 	if s.fallback == nil {
 		return authErr
 	}
-	s.stats.fallbackHits.Add(1)
+	s.stats.add(runtimeCounterFallbackHits, 1)
 	_ = connection.SetDeadline(time.Time{})
 	if err := s.fallback.Serve(ctx, connection, prefix); err != nil {
-		s.stats.fallbackErrors.Add(1)
+		s.stats.add(runtimeCounterFallbackErrors, 1)
 		return fmt.Errorf("artx: fallback failed: %w", err)
 	}
 	return nil
