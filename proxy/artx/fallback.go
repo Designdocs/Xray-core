@@ -447,9 +447,15 @@ func readBoundedResponse(body io.ReadCloser) ([]byte, error) {
 func writeHTTP1Response(writer io.Writer, response *http.Response, body []byte) error {
 	clone := new(http.Response)
 	*clone = *response
+	clone.Proto = "HTTP/1.1"
+	clone.ProtoMajor = 1
+	clone.ProtoMinor = 1
 	clone.Body = io.NopCloser(bytes.NewReader(body))
-	clone.ContentLength = int64(len(body))
-	clone.TransferEncoding = nil
+	if clone.ContentLength < 0 {
+		clone.TransferEncoding = []string{"chunked"}
+	} else {
+		clone.TransferEncoding = nil
+	}
 	clone.Close = true
 	clone.Header = response.Header.Clone()
 	clone.Header.Set("Connection", "close")

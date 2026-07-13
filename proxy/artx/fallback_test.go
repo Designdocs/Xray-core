@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -118,6 +119,123 @@ func TestHTTPFallbackServesHTTP11FromCapturedPrefix(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("HTTP/1.1 fallback did not release the connection")
 	}
+}
+
+func TestHTTPFallbackSyntheticResponsePreservesTransparentFraming(t *testing.T) {
+	const body = "stable streamed decoy response"
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("X-Service", "ready")
+		writer.WriteHeader(http.StatusOK)
+		writer.(http.Flusher).Flush()
+		_, _ = io.WriteString(writer, body)
+	}))
+	defer origin.Close()
+
+	handler, err := NewHTTPFallback(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transparent, transparentBody := readFallbackHTTP1Response(t, handler, []byte("GET / HTTP/1.1\r\nHost: public.example\r\nConnection: close\r\n\r\n"))
+	synthetic, syntheticBody := readFallbackHTTP1Response(t, handler, []byte("garbage"))
+	if transparentBody != body || syntheticBody != body {
+		t.Fatalf("response bodies differ: transparent=%q synthetic=%q", transparentBody, syntheticBody)
+	}
+	if transparent.ContentLength != -1 || !slices.Equal(transparent.TransferEncoding, []string{"chunked"}) {
+		t.Fatalf("transparent response is not unknown-length chunked framing: %#v", transparent)
+	}
+	if transparent.Header.Get("Content-Length") != synthetic.Header.Get("Content-Length") ||
+		transparent.ContentLength != synthetic.ContentLength ||
+		!slices.Equal(transparent.TransferEncoding, synthetic.TransferEncoding) ||
+		transparent.Close != synthetic.Close {
+		t.Fatalf("response framing differs: transparent=%#v synthetic=%#v", transparent, synthetic)
+	}
+}
+
+func TestHTTPFallbackSyntheticResponsePreservesKnownLength(t *testing.T) {
+	const body = "fixed decoy response"
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = io.WriteString(writer, body)
+	}))
+	defer origin.Close()
+
+	handler, err := NewHTTPFallback(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transparent, transparentBody := readFallbackHTTP1Response(t, handler, []byte("GET / HTTP/1.1\r\nHost: public.example\r\nConnection: close\r\n\r\n"))
+	synthetic, syntheticBody := readFallbackHTTP1Response(t, handler, []byte("garbage"))
+	if transparentBody != body || syntheticBody != body {
+		t.Fatalf("response bodies differ: transparent=%q synthetic=%q", transparentBody, syntheticBody)
+	}
+	if transparent.ContentLength != int64(len(body)) ||
+		transparent.Header.Get("Content-Length") != synthetic.Header.Get("Content-Length") ||
+		transparent.ContentLength != synthetic.ContentLength ||
+		!slices.Equal(transparent.TransferEncoding, synthetic.TransferEncoding) ||
+		transparent.Close != synthetic.Close {
+		t.Fatalf("response framing differs: transparent=%#v synthetic=%#v", transparent, synthetic)
+	}
+}
+
+func TestWriteHTTP1ResponseNormalizesHTTP2OriginMetadata(t *testing.T) {
+	response := &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Proto:         "HTTP/2.0",
+		ProtoMajor:    2,
+		ProtoMinor:    0,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader("ordinary response")),
+		ContentLength: -1,
+	}
+	var encoded bytes.Buffer
+	if err := writeHTTP1Response(&encoded, response, []byte("ordinary response")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(encoded.String(), "HTTP/1.1 200 OK\r\n") {
+		t.Fatalf("response status line = %q", encoded.String())
+	}
+	parsed, err := http.ReadResponse(bufio.NewReader(&encoded), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(parsed.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = parsed.Body.Close()
+	if string(payload) != "ordinary response" || !slices.Equal(parsed.TransferEncoding, []string{"chunked"}) {
+		t.Fatalf("response framing = %#v body=%q", parsed, payload)
+	}
+}
+
+func readFallbackHTTP1Response(t *testing.T, handler *HTTPFallback, prefix []byte) (*http.Response, string) {
+	t.Helper()
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		err := handler.Serve(context.Background(), server, prefix)
+		_ = server.Close()
+		done <- err
+	}()
+
+	response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	_ = client.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	return response, string(payload)
 }
 
 func TestHTTPFallbackReturnsPrivacySafeGatewayError(t *testing.T) {
