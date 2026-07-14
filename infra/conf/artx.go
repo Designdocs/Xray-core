@@ -37,8 +37,8 @@ func (config *ArtXServerConfig) Build() (proto.Message, error) {
 	if config.WireVersion != 1 {
 		return nil, errors.New("ARTX: wireVersion must be 1")
 	}
-	if config.ProfileVersion == 0 {
-		return nil, errors.New("ARTX: profileVersion required")
+	if config.ProfileVersion < 1 || config.ProfileVersion > 2 {
+		return nil, errors.New("ARTX: profileVersion must be 1 or 2")
 	}
 	tlsSettings, err := config.TLSSettings.Build()
 	if err != nil {

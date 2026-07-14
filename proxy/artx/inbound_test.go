@@ -742,7 +742,7 @@ func newArtXTestServerWithCertificate(t *testing.T, certificate *transporttls.Ce
 		Users:          []*protocol.User{protocol.ToProtoUser(artxMemoryUser("user@example.com", "test-psk"))},
 		TlsSettings:    &transporttls.Config{Certificate: []*transporttls.Certificate{certificate}},
 		WireVersion:    1,
-		ProfileVersion: 7,
+		ProfileVersion: 1,
 	}
 	server, err := NewServer(context.Background(), config)
 	if err != nil {

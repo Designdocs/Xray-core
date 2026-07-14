@@ -51,8 +51,8 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config.WireVersion != 1 {
 		return nil, fmt.Errorf("artx: unsupported wire version %d", config.WireVersion)
 	}
-	if config.ProfileVersion == 0 {
-		return nil, errors.New("artx: profile version is required")
+	if config.ProfileVersion < profileVersionUnshaped || config.ProfileVersion > profileVersionEarlyRecordShaping {
+		return nil, fmt.Errorf("artx: unsupported profile version %d", config.ProfileVersion)
 	}
 
 	tlsSettings := proto.Clone(config.TlsSettings).(*transporttls.Config)
@@ -154,8 +154,16 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	}
 
 	writer := &lockedFrameWriter{writer: tlsConnection}
-	if err := writer.write(Frame{Type: FrameSettings, Payload: mustEncodeSettings(s.profileVersion)}); err != nil {
-		return err
+	account, ok := user.Account.(*MemoryAccount)
+	if !ok {
+		return errors.New("artx: authenticated user account is invalid")
+	}
+	settingsFlight, err := newServerSettingsFlight(s.profileVersion, []byte(account.PSK), auth.Salt)
+	if err != nil {
+		return fmt.Errorf("artx: build server SETTINGS flight: %w", err)
+	}
+	if err := writer.writeChunks(settingsFlight.chunks...); err != nil {
+		return fmt.Errorf("artx: write server SETTINGS flight: %w", err)
 	}
 	peerSettings, err := ReadFrame(tlsConnection)
 	if err != nil {
@@ -264,11 +272,6 @@ func settingsForProfile(profileVersion uint32) map[uint16]uint32 {
 	return settings
 }
 
-func mustEncodeSettings(profileVersion uint32) []byte {
-	payload, _ := EncodeSettings(settingsList(profileVersion))
-	return payload
-}
-
 func validatePeerSettings(settings map[uint16]uint32, profileVersion uint32) error {
 	want := settingsForProfile(profileVersion)
 	for key, value := range want {
@@ -289,17 +292,30 @@ func (writer *lockedFrameWriter) write(frame Frame) error {
 	if err != nil {
 		return err
 	}
+	return writer.writeChunks(encoded)
+}
+
+func (writer *lockedFrameWriter) writeChunks(chunks ...[]byte) error {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	for len(encoded) > 0 {
-		written, err := writer.writer.Write(encoded)
+	for _, chunk := range chunks {
+		if err := writeAll(writer.writer, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeAll(writer io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		written, err := writer.Write(payload)
 		if err != nil {
 			return err
 		}
 		if written == 0 {
 			return io.ErrShortWrite
 		}
-		encoded = encoded[written:]
+		payload = payload[written:]
 	}
 	return nil
 }

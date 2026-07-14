@@ -12,7 +12,7 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 		Users:          []*ArtXUser{{PSK: "secret", Email: "user@example.com", Level: 2}},
 		TLSSettings:    &TLSConfig{},
 		WireVersion:    1,
-		ProfileVersion: 7,
+		ProfileVersion: 2,
 	}
 	built, err := config.Build()
 	if err != nil {
@@ -22,7 +22,7 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 	if !ok {
 		t.Fatalf("Build() = %T", built)
 	}
-	if server.WireVersion != 1 || server.ProfileVersion != 7 || server.TlsSettings == nil || len(server.Users) != 1 {
+	if server.WireVersion != 1 || server.ProfileVersion != 2 || server.TlsSettings == nil || len(server.Users) != 1 {
 		t.Fatalf("server config = %#v", server)
 	}
 	user, err := server.Users[0].ToMemoryUser()
@@ -40,7 +40,7 @@ func TestArtXInboundConfigBuildsFallback(t *testing.T) {
 		Users:          []*ArtXUser{{PSK: "secret"}},
 		TLSSettings:    &TLSConfig{},
 		WireVersion:    1,
-		ProfileVersion: 7,
+		ProfileVersion: 2,
 		Fallback: &ArtXFallbackConfig{
 			Enabled: true,
 			Origin:  "http://127.0.0.1:60443/",
@@ -100,6 +100,7 @@ func TestArtXInboundConfigRejectsInvalidBoundaryValues(t *testing.T) {
 		{Users: []*ArtXUser{{PSK: "secret"}}, WireVersion: 1, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 2, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1},
+		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 3},
 	}
 	for index := range tests {
 		if _, err := tests[index].Build(); err == nil {
