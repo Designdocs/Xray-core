@@ -51,8 +51,11 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config.WireVersion != 1 {
 		return nil, fmt.Errorf("artx: unsupported wire version %d", config.WireVersion)
 	}
-	if config.ProfileVersion < profileVersionUnshaped || config.ProfileVersion > profileVersionEarlyRecordShaping {
+	if config.ProfileVersion < profileVersionUnshaped || config.ProfileVersion > profileVersionTimedRecordShaping {
 		return nil, fmt.Errorf("artx: unsupported profile version %d", config.ProfileVersion)
+	}
+	if config.ProfileVersion == profileVersionTimedRecordShaping && !preciseSettingsDeadlineSupported {
+		return nil, errPreciseSettingsDeadlineUnsupported
 	}
 
 	tlsSettings := proto.Clone(config.TlsSettings).(*transporttls.Config)
@@ -162,8 +165,14 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if err != nil {
 		return fmt.Errorf("artx: build server SETTINGS flight: %w", err)
 	}
-	if err := writer.writeChunks(settingsFlight.chunks...); err != nil {
-		return fmt.Errorf("artx: write server SETTINGS flight: %w", err)
+	var settingsWriteErr error
+	if s.profileVersion == profileVersionTimedRecordShaping {
+		settingsWriteErr = writer.writeChunksWithGap(ctx, settingsFlight.chunks, settingsFlight.targetStartGap, s.now, waitForSettingsDeadline)
+	} else {
+		settingsWriteErr = writer.writeChunks(settingsFlight.chunks...)
+	}
+	if settingsWriteErr != nil {
+		return fmt.Errorf("artx: write server SETTINGS flight: %w", settingsWriteErr)
 	}
 	peerSettings, err := ReadFrame(tlsConnection)
 	if err != nil {

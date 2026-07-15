@@ -35,6 +35,22 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 	}
 }
 
+func TestArtXInboundConfigBuildsProfileV3(t *testing.T) {
+	config := &ArtXServerConfig{
+		Users:          []*ArtXUser{{PSK: "secret"}},
+		TLSSettings:    &TLSConfig{},
+		WireVersion:    1,
+		ProfileVersion: 3,
+	}
+	built, err := config.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profileVersion := built.(*artx.ServerConfig).ProfileVersion; profileVersion != 3 {
+		t.Fatalf("profile version = %d, want 3", profileVersion)
+	}
+}
+
 func TestArtXInboundConfigBuildsFallback(t *testing.T) {
 	config := &ArtXServerConfig{
 		Users:          []*ArtXUser{{PSK: "secret"}},
@@ -100,7 +116,7 @@ func TestArtXInboundConfigRejectsInvalidBoundaryValues(t *testing.T) {
 		{Users: []*ArtXUser{{PSK: "secret"}}, WireVersion: 1, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 2, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1},
-		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 3},
+		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 4},
 	}
 	for index := range tests {
 		if _, err := tests[index].Build(); err == nil {

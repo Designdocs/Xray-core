@@ -49,6 +49,34 @@ func TestArtXServerRequiresTLS13(t *testing.T) {
 	}
 }
 
+func TestArtXServerValidatesProfileVersions(t *testing.T) {
+	certificatePEM, keyPEM := testCertificate(t)
+	baseConfig := ServerConfig{
+		Users:       []*protocol.User{protocol.ToProtoUser(artxMemoryUser("user@example.com", "test-psk"))},
+		TlsSettings: &transporttls.Config{Certificate: []*transporttls.Certificate{{Certificate: certificatePEM, Key: keyPEM}}},
+		WireVersion: 1,
+	}
+	profileV3 := baseConfig
+	profileV3.ProfileVersion = 3
+	server, err := NewServer(context.Background(), &profileV3)
+	if preciseSettingsDeadlineSupported {
+		if err != nil {
+			t.Fatalf("profile v3: %v", err)
+		}
+		if server.profileVersion != profileVersionTimedRecordShaping {
+			t.Fatalf("profile version = %d, want 3", server.profileVersion)
+		}
+	} else if !errors.Is(err, errPreciseSettingsDeadlineUnsupported) {
+		t.Fatalf("profile v3 error = %v, want %v", err, errPreciseSettingsDeadlineUnsupported)
+	}
+
+	profileV4 := baseConfig
+	profileV4.ProfileVersion = 4
+	if _, err := NewServer(context.Background(), &profileV4); err == nil {
+		t.Fatal("profile v4 was accepted")
+	}
+}
+
 func TestArtXAuthenticationBindsTLSExporterAndRejectsReplay(t *testing.T) {
 	server := newArtXTestServer(t)
 	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
