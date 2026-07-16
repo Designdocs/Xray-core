@@ -24,4 +24,5 @@ message ServerConfig {
   uint32 wire_version = 3;
   uint32 profile_version = 4;
   FallbackConfig fallback = 5;
+  bool udp_enabled = 6;
 }

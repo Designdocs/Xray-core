@@ -23,6 +23,7 @@ type ArtXServerConfig struct {
 	WireVersion    uint32              `json:"wireVersion"`
 	ProfileVersion uint32              `json:"profileVersion"`
 	Fallback       *ArtXFallbackConfig `json:"fallback"`
+	UDPEnabled     bool                `json:"udpEnabled"`
 }
 
 type ArtXFallbackConfig struct {
@@ -48,6 +49,7 @@ func (config *ArtXServerConfig) Build() (proto.Message, error) {
 		TlsSettings:    tlsSettings.(*transporttls.Config),
 		WireVersion:    config.WireVersion,
 		ProfileVersion: config.ProfileVersion,
+		UdpEnabled:     config.UDPEnabled,
 		Users:          make([]*protocol.User, 0, len(config.Users)),
 	}
 	if config.Fallback != nil {

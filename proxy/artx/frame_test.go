@@ -31,6 +31,17 @@ func TestGoldenCommonFrames(t *testing.T) {
 	assertFrameHex(t, Frame{Type: FrameTCPSyn, StreamID: ClientStreamID, Payload: tcpSyn}, "100000000100000f030b6578616d706c652e636f6d01bb")
 	assertFrameHex(t, Frame{Type: FrameData, StreamID: ClientStreamID, Payload: []byte("GET / HTTP/1.1\r\n\r\n")}, "1100000001000012474554202f20485454502f312e310d0a0d0a")
 	assertFrameHex(t, Frame{Type: FrameFin, StreamID: ClientStreamID}, "1200000001000000")
+	udpDestination := xnet.UDPDestination(xnet.DomainAddress("dns.example"), 53)
+	udpAssoc, err := EncodeUDPDestination(udpDestination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFrameHex(t, Frame{Type: FrameUDPAssoc, StreamID: ClientStreamID, Payload: udpAssoc}, "150000000100000f030b646e732e6578616d706c650035")
+	datagram, err := EncodeDatagram([]byte{0x12, 0x34})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFrameHex(t, Frame{Type: FrameDatagram, StreamID: ClientStreamID, Payload: datagram}, "160000000100000400021234")
 
 	got, err := DecodeSettings(settings)
 	if err != nil {
@@ -83,6 +94,8 @@ func TestKnownFrameStreamIDs(t *testing.T) {
 		{Type: FrameData, StreamID: 2},
 		{Type: FrameFin},
 		{Type: FrameRST, StreamID: 2},
+		{Type: FrameUDPAssoc},
+		{Type: FrameDatagram, StreamID: 2, Payload: []byte{0, 0}},
 		{Type: FrameWindowUpdate, StreamID: 2, Payload: []byte{0, 0, 0, 1}},
 	}
 
@@ -107,6 +120,30 @@ func TestKnownFrameStreamIDs(t *testing.T) {
 	} {
 		if _, err := frame.MarshalBinary(); err != nil {
 			t.Fatalf("frame type 0x%02x stream %d rejected: %v", frame.Type, frame.StreamID, err)
+		}
+	}
+}
+
+func TestDatagramBoundariesAndLimits(t *testing.T) {
+	for _, payload := range [][]byte{nil, []byte("dns"), bytes.Repeat([]byte{0xff}, maxDatagramPayload)} {
+		encoded, err := EncodeDatagram(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeDatagram(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(decoded, payload) {
+			t.Fatalf("decoded %d bytes, want %d", len(decoded), len(payload))
+		}
+	}
+	if _, err := EncodeDatagram(make([]byte, maxDatagramPayload+1)); err == nil {
+		t.Fatal("oversized UDP packet accepted")
+	}
+	for _, malformed := range [][]byte{nil, {0}, {0, 2, 1}, {0, 0, 1}} {
+		if _, err := DecodeDatagram(malformed); err == nil {
+			t.Fatalf("malformed DATAGRAM %x accepted", malformed)
 		}
 	}
 }
@@ -155,6 +192,24 @@ func TestTCPDestinationFamilies(t *testing.T) {
 				t.Fatalf("decoded destination = %s", decoded.String())
 			}
 		})
+	}
+}
+
+func TestUDPDestinationFamilies(t *testing.T) {
+	destination := xnet.UDPDestination(xnet.DomainAddress("dns.example"), 53)
+	encoded, err := EncodeUDPDestination(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeUDPDestination(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Network != xnet.Network_UDP || decoded.String() != destination.String() {
+		t.Fatalf("decoded destination = %s", decoded.String())
+	}
+	if _, err := EncodeUDPDestination(xnet.TCPDestination(xnet.DomainAddress("dns.example"), 53)); err == nil {
+		t.Fatal("TCP destination accepted as UDP")
 	}
 }
 

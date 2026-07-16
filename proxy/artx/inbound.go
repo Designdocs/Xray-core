@@ -14,6 +14,7 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
+	protocoludp "github.com/xtls/xray-core/common/protocol/udp"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
@@ -21,6 +22,7 @@ import (
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	transporttls "github.com/xtls/xray-core/transport/internet/tls"
+	"github.com/xtls/xray-core/transport/internet/udp"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -41,6 +43,7 @@ type Server struct {
 	fallback       FallbackHandler
 	stats          runtimeCounters
 	profileVersion uint32
+	udpEnabled     bool
 	now            func() time.Time
 }
 
@@ -76,6 +79,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		tlsConfig:      tlsConfig,
 		replay:         newReplayCache(replayCacheCapacity, replayCacheTTL, time.Now),
 		profileVersion: config.ProfileVersion,
+		udpEnabled:     config.UdpEnabled,
 		now:            time.Now,
 	}
 	if instance := core.FromContext(ctx); instance != nil {
@@ -189,22 +193,33 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 		return err
 	}
 
-	syn, err := ReadFrame(tlsConnection)
+	openFrame, err := ReadFrame(tlsConnection)
 	if err != nil {
 		return err
 	}
-	if syn.Type != FrameTCPSyn || syn.StreamID != ClientStreamID {
-		return errors.New("artx: first stream frame must be TCP_SYN on stream 1")
+	switch openFrame.Type {
+	case FrameTCPSyn:
+		destination, err := DecodeTCPDestination(openFrame.Payload)
+		if err != nil {
+			return err
+		}
+		link, err := dispatcher.Dispatch(ctx, destination)
+		if err != nil {
+			return fmt.Errorf("artx: dispatch: %w", err)
+		}
+		return relaySingleStream(ctx, tlsConnection, writer, link)
+	case FrameUDPAssoc:
+		if !s.udpEnabled {
+			return errors.New("artx: UDP is disabled")
+		}
+		destination, err := DecodeUDPDestination(openFrame.Payload)
+		if err != nil {
+			return err
+		}
+		return relayUDPAssociation(ctx, tlsConnection, writer, dispatcher, destination)
+	default:
+		return errors.New("artx: first stream frame must be TCP_SYN or UDP_ASSOC on stream 1")
 	}
-	destination, err := DecodeTCPDestination(syn.Payload)
-	if err != nil {
-		return err
-	}
-	link, err := dispatcher.Dispatch(ctx, destination)
-	if err != nil {
-		return fmt.Errorf("artx: dispatch: %w", err)
-	}
-	return relaySingleStream(ctx, tlsConnection, writer, link)
 }
 
 func (s *Server) Stats() RuntimeStats {
@@ -734,6 +749,97 @@ func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transpo
 				return writer.write(Frame{Type: FrameFin, StreamID: ClientStreamID})
 			}
 			return readErr
+		}
+	}
+}
+
+func relayUDPAssociation(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, dispatcher routing.Dispatcher, destination xnet.Destination) error {
+	relayCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sendWindow := newSendWindow()
+	receiveWindow := newSendWindow()
+	responseErr := make(chan error, 1)
+	udpDispatcher := udp.NewDispatcher(dispatcher, func(_ context.Context, packet *protocoludp.Packet) {
+		defer packet.Payload.Release()
+		payload, err := EncodeDatagram(packet.Payload.Bytes())
+		if err == nil {
+			err = sendWindow.waitConsume(relayCtx, len(payload))
+		}
+		if err == nil {
+			err = writer.write(Frame{Type: FrameDatagram, StreamID: ClientStreamID, Payload: payload})
+		}
+		if err != nil {
+			select {
+			case responseErr <- err:
+			default:
+			}
+			cancel()
+			abortTransport(connection)
+		}
+	})
+	defer udpDispatcher.RemoveRay()
+
+	clientFinished := false
+	for {
+		frame, err := ReadFrame(connection)
+		if err != nil {
+			select {
+			case responseWriteErr := <-responseErr:
+				return responseWriteErr
+			default:
+			}
+			if clientFinished && errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		switch frame.Type {
+		case FrameDatagram:
+			if clientFinished {
+				return errors.New("artx: DATAGRAM after FIN")
+			}
+			payload, err := DecodeDatagram(frame.Payload)
+			if err != nil {
+				return err
+			}
+			if err := receiveWindow.consume(len(frame.Payload)); err != nil {
+				return err
+			}
+			packet := buf.FromBytes(payload)
+			packet.UDP = &destination
+			udpDispatcher.Dispatch(relayCtx, destination, packet)
+			if err := replenishReceiveWindow(writer, receiveWindow, len(frame.Payload)); err != nil {
+				return err
+			}
+		case FrameFin:
+			if clientFinished || len(frame.Payload) != 0 {
+				return errors.New("artx: invalid UDP FIN")
+			}
+			clientFinished = true
+			udpDispatcher.RemoveRay()
+			return writer.write(Frame{Type: FrameFin, StreamID: ClientStreamID})
+		case FrameRST:
+			if len(frame.Payload) != 1 {
+				return errors.New("artx: invalid UDP RST")
+			}
+			return nil
+		case FrameWindowUpdate:
+			increment, err := DecodeWindowUpdate(frame.Payload)
+			if err != nil {
+				return err
+			}
+			if err := sendWindow.update(frame.StreamID, increment); err != nil {
+				return err
+			}
+		case FramePadding:
+			continue
+		case FrameSettings:
+			return errors.New("artx: SETTINGS after UDP association open")
+		case FrameTCPSyn, FrameUDPAssoc, FrameData:
+			return errors.New("artx: invalid frame in UDP association")
+		default:
+			continue
 		}
 	}
 }

@@ -13,6 +13,7 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 		TLSSettings:    &TLSConfig{},
 		WireVersion:    1,
 		ProfileVersion: 2,
+		UDPEnabled:     true,
 	}
 	built, err := config.Build()
 	if err != nil {
@@ -22,7 +23,7 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 	if !ok {
 		t.Fatalf("Build() = %T", built)
 	}
-	if server.WireVersion != 1 || server.ProfileVersion != 2 || server.TlsSettings == nil || len(server.Users) != 1 {
+	if server.WireVersion != 1 || server.ProfileVersion != 2 || !server.UdpEnabled || server.TlsSettings == nil || len(server.Users) != 1 {
 		t.Fatalf("server config = %#v", server)
 	}
 	user, err := server.Users[0].ToMemoryUser()

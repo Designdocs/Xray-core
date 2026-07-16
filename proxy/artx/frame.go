@@ -26,8 +26,12 @@ const (
 	FrameFin          = byte(0x12)
 	FrameRST          = byte(0x13)
 	FrameWindowUpdate = byte(0x14)
+	FrameUDPAssoc     = byte(0x15)
+	FrameDatagram     = byte(0x16)
 	FramePadding      = byte(0x20)
 )
+
+const maxDatagramPayload = int(^uint16(0))
 
 const (
 	SettingMaxConcurrentStreams     = uint16(0x0001)
@@ -131,8 +135,47 @@ func DecodeWindowUpdate(payload []byte) (uint32, error) {
 }
 
 func EncodeTCPDestination(destination xnet.Destination) ([]byte, error) {
-	if destination.Network != xnet.Network_TCP || destination.Address == nil || destination.Port == 0 {
+	if destination.Network != xnet.Network_TCP {
 		return nil, errors.New("invalid ArtX TCP destination")
+	}
+	return encodeDestination(destination)
+}
+
+func DecodeTCPDestination(payload []byte) (xnet.Destination, error) {
+	return decodeDestination(payload, xnet.Network_TCP)
+}
+
+func EncodeUDPDestination(destination xnet.Destination) ([]byte, error) {
+	if destination.Network != xnet.Network_UDP {
+		return nil, errors.New("invalid ArtX UDP destination")
+	}
+	return encodeDestination(destination)
+}
+
+func DecodeUDPDestination(payload []byte) (xnet.Destination, error) {
+	return decodeDestination(payload, xnet.Network_UDP)
+}
+
+func EncodeDatagram(payload []byte) ([]byte, error) {
+	if len(payload) > maxDatagramPayload {
+		return nil, errors.New("ArtX DATAGRAM payload is too large")
+	}
+	encoded := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(encoded, uint16(len(payload)))
+	copy(encoded[2:], payload)
+	return encoded, nil
+}
+
+func DecodeDatagram(payload []byte) ([]byte, error) {
+	if len(payload) < 2 || int(binary.BigEndian.Uint16(payload)) != len(payload)-2 {
+		return nil, errors.New("invalid ArtX DATAGRAM payload length")
+	}
+	return payload[2:], nil
+}
+
+func encodeDestination(destination xnet.Destination) ([]byte, error) {
+	if destination.Address == nil || destination.Port == 0 {
+		return nil, errors.New("invalid ArtX destination")
 	}
 
 	var address []byte
@@ -160,9 +203,9 @@ func EncodeTCPDestination(destination xnet.Destination) ([]byte, error) {
 	return encoded, nil
 }
 
-func DecodeTCPDestination(payload []byte) (xnet.Destination, error) {
+func decodeDestination(payload []byte, network xnet.Network) (xnet.Destination, error) {
 	if len(payload) < 3 {
-		return xnet.Destination{}, errors.New("truncated ArtX TCP destination")
+		return xnet.Destination{}, errors.New("truncated ArtX destination")
 	}
 
 	var address xnet.Address
@@ -190,7 +233,7 @@ func DecodeTCPDestination(payload []byte) (xnet.Destination, error) {
 		if port == 0 {
 			return xnet.Destination{}, errors.New("invalid ArtX destination port")
 		}
-		return xnet.TCPDestination(address, xnet.Port(port)), nil
+		return xnet.Destination{Network: network, Address: address, Port: xnet.Port(port)}, nil
 	default:
 		return xnet.Destination{}, fmt.Errorf("unsupported ArtX address type 0x%02x", payload[0])
 	}
@@ -199,7 +242,7 @@ func DecodeTCPDestination(payload []byte) (xnet.Destination, error) {
 	if port == 0 {
 		return xnet.Destination{}, errors.New("invalid ArtX destination port")
 	}
-	return xnet.TCPDestination(address, xnet.Port(port)), nil
+	return xnet.Destination{Network: network, Address: address, Port: xnet.Port(port)}, nil
 }
 
 func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
@@ -209,12 +252,15 @@ func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
 	if frameType == FrameData && payloadLength > MaxDataPayload {
 		return errors.New("ArtX DATA payload is too large")
 	}
+	if frameType == FrameDatagram && payloadLength > maxDatagramPayload+2 {
+		return errors.New("ArtX DATAGRAM payload is too large")
+	}
 	switch frameType {
 	case FrameSettings, FramePadding:
 		if streamID != 0 {
 			return errors.New("ArtX connection frame has a stream ID")
 		}
-	case FrameTCPSyn, FrameData, FrameFin, FrameRST:
+	case FrameTCPSyn, FrameData, FrameFin, FrameRST, FrameUDPAssoc, FrameDatagram:
 		if streamID != ClientStreamID {
 			return errors.New("ArtX stream frame has an invalid stream ID")
 		}

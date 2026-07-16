@@ -15,6 +15,7 @@ import (
 	"io"
 	"math/big"
 	stdnet "net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -491,6 +492,93 @@ func TestArtXSingleStreamRelayChunksAndReplenishesWindows(t *testing.T) {
 		}
 		handleFrame(frame)
 	}
+}
+
+func TestArtXUDPAssociationPreservesDatagramBoundaries(t *testing.T) {
+	server := newArtXTestServer(t)
+	server.udpEnabled = true
+	target, dispatcher, closer := newTargetDispatcher()
+	defer closer.Close()
+	client, processDone := connectArtXClient(t, server, dispatcher)
+
+	destination := xnet.UDPDestination(xnet.DomainAddress("dns.example"), 53)
+	encodedDestination, err := EncodeUDPDestination(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFrameForTest(t, client, Frame{Type: FrameUDPAssoc, StreamID: ClientStreamID, Payload: encodedDestination})
+
+	requests := [][]byte{[]byte("dns-query"), bytes.Repeat([]byte{0xa5}, 1232)}
+	for _, request := range requests {
+		payload, err := EncodeDatagram(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFrameForTest(t, client, Frame{Type: FrameDatagram, StreamID: ClientStreamID, Payload: payload})
+		buffers, err := target.Reader.ReadMultiBuffer()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(buffers) != 1 || !bytes.Equal(buffers[0].Bytes(), request) {
+			buf.ReleaseMulti(buffers)
+			t.Fatalf("target datagram = %#v, want %d bytes", buffers, len(request))
+		}
+		if buffers[0].UDP == nil || buffers[0].UDP.String() != destination.String() {
+			buf.ReleaseMulti(buffers)
+			t.Fatalf("target destination = %#v", buffers[0].UDP)
+		}
+		buf.ReleaseMulti(buffers)
+		readWindowUpdates(t, client, uint32(len(request)+2))
+	}
+
+	responses := [][]byte{[]byte("dns-response"), bytes.Repeat([]byte{0x5a}, 1200)}
+	for _, response := range responses {
+		if err := target.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(response)}); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			frame, err := ReadFrame(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frame.Type != FrameDatagram {
+				continue
+			}
+			payload, err := DecodeDatagram(frame.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(payload, response) {
+				t.Fatalf("client datagram = %d bytes, want %d", len(payload), len(response))
+			}
+			break
+		}
+	}
+
+	writeFrameForTest(t, client, Frame{Type: FrameFin, StreamID: ClientStreamID})
+	readUntilFrame(t, client, FrameFin)
+	closeTLSNow(client)
+	if err := <-processDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArtXUDPAssociationRequiresServerSwitch(t *testing.T) {
+	server := newArtXTestServer(t)
+	dispatcher := &countingRejectingDispatcher{}
+	client, processDone := connectArtXClient(t, server, dispatcher)
+	destination, err := EncodeUDPDestination(xnet.UDPDestination(xnet.DomainAddress("dns.example"), 53))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFrameForTest(t, client, Frame{Type: FrameUDPAssoc, StreamID: ClientStreamID, Payload: destination})
+	if err := <-processDone; err == nil || !strings.Contains(err.Error(), "UDP is disabled") {
+		t.Fatalf("disabled UDP error = %v", err)
+	}
+	if calls := dispatcher.Calls(); calls != 0 {
+		t.Fatalf("dispatcher calls = %d", calls)
+	}
+	closeTLSNow(client)
 }
 
 func TestArtXClientFINStillReceivesTargetResponse(t *testing.T) {
