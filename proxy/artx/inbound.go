@@ -42,6 +42,7 @@ type Server struct {
 	replay         *replayCache
 	fallback       FallbackHandler
 	stats          runtimeCounters
+	wireVersion    uint32
 	profileVersion uint32
 	udpEnabled     bool
 	now            func() time.Time
@@ -51,7 +52,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config == nil || config.TlsSettings == nil || len(config.TlsSettings.Certificate) == 0 {
 		return nil, errors.New("artx: TLS certificate is required")
 	}
-	if config.WireVersion != 1 {
+	if config.WireVersion != 1 && config.WireVersion != 2 {
 		return nil, fmt.Errorf("artx: unsupported wire version %d", config.WireVersion)
 	}
 	if config.ProfileVersion < profileVersionUnshaped || config.ProfileVersion > profileVersionTimedRecordShaping {
@@ -78,6 +79,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	server := &Server{
 		tlsConfig:      tlsConfig,
 		replay:         newReplayCache(replayCacheCapacity, replayCacheTTL, time.Now),
+		wireVersion:    config.WireVersion,
 		profileVersion: config.ProfileVersion,
 		udpEnabled:     config.UdpEnabled,
 		now:            time.Now,
@@ -165,7 +167,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if !ok {
 		return errors.New("artx: authenticated user account is invalid")
 	}
-	settingsFlight, err := newServerSettingsFlight(s.profileVersion, []byte(account.PSK), auth.Salt)
+	settingsFlight, err := newServerSettingsFlightForWire(s.wireVersion, s.profileVersion, []byte(account.PSK), auth.Salt)
 	if err != nil {
 		return fmt.Errorf("artx: build server SETTINGS flight: %w", err)
 	}
@@ -189,8 +191,11 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if err != nil {
 		return err
 	}
-	if err := validatePeerSettings(settings, s.profileVersion); err != nil {
+	if err := validatePeerSettingsForWire(settings, s.wireVersion, s.profileVersion); err != nil {
 		return err
+	}
+	if s.wireVersion == 2 {
+		return s.processReusableSession(ctx, tlsConnection, dispatcher)
 	}
 
 	openFrame, err := ReadFrame(tlsConnection)
@@ -280,24 +285,40 @@ func (s *Server) authenticate(frame AuthFrame, exporter []byte) (*protocol.Memor
 }
 
 func settingsList(profileVersion uint32) []Setting {
-	return []Setting{
+	return settingsListForWire(1, profileVersion)
+}
+
+func settingsListForWire(wireVersion, profileVersion uint32) []Setting {
+	settings := []Setting{
 		{Key: SettingMaxConcurrentStreams, Value: 1},
 		{Key: SettingInitialStreamWindow, Value: InitialStreamWindow},
 		{Key: SettingInitialConnectionWindow, Value: InitialConnectionWindow},
 		{Key: SettingPaddingProfileVersionAck, Value: profileVersion},
 	}
+	if wireVersion == 2 {
+		settings = append(settings, Setting{Key: SettingSessionReuse, Value: 1})
+	}
+	return settings
 }
 
 func settingsForProfile(profileVersion uint32) map[uint16]uint32 {
+	return settingsForWire(1, profileVersion)
+}
+
+func settingsForWire(wireVersion, profileVersion uint32) map[uint16]uint32 {
 	settings := make(map[uint16]uint32, 4)
-	for _, setting := range settingsList(profileVersion) {
+	for _, setting := range settingsListForWire(wireVersion, profileVersion) {
 		settings[setting.Key] = setting.Value
 	}
 	return settings
 }
 
 func validatePeerSettings(settings map[uint16]uint32, profileVersion uint32) error {
-	want := settingsForProfile(profileVersion)
+	return validatePeerSettingsForWire(settings, 1, profileVersion)
+}
+
+func validatePeerSettingsForWire(settings map[uint16]uint32, wireVersion, profileVersion uint32) error {
+	want := settingsForWire(wireVersion, profileVersion)
 	for key, value := range want {
 		if settings[key] != value {
 			return fmt.Errorf("artx: incompatible setting 0x%04x", key)
@@ -307,16 +328,33 @@ func validatePeerSettings(settings map[uint16]uint32, profileVersion uint32) err
 }
 
 type lockedFrameWriter struct {
-	mu     sync.Mutex
-	writer io.Writer
+	mu          sync.Mutex
+	writer      io.Writer
+	wireVersion uint32
+	streamID    uint32
 }
 
 func (writer *lockedFrameWriter) write(frame Frame) error {
-	encoded, err := frame.MarshalBinary()
-	if err != nil {
-		return err
+	return writer.writeFrames(frame)
+}
+
+func (writer *lockedFrameWriter) writeFrames(frames ...Frame) error {
+	chunks := make([][]byte, 0, len(frames))
+	for _, frame := range frames {
+		if writer.streamID != 0 && frame.StreamID == ClientStreamID {
+			frame.StreamID = writer.streamID
+		}
+		wireVersion := writer.wireVersion
+		if wireVersion == 0 {
+			wireVersion = 1
+		}
+		encoded, err := frame.marshal(wireVersion)
+		if err != nil {
+			return err
+		}
+		chunks = append(chunks, encoded)
 	}
-	return writer.writeChunks(encoded)
+	return writer.writeChunks(chunks...)
 }
 
 func (writer *lockedFrameWriter) writeChunks(chunks ...[]byte) error {
@@ -425,12 +463,18 @@ type relayResult struct {
 }
 
 func relaySingleStream(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link) error {
+	return relaySingleStreamFrames(ctx, connection, writer, link, func() (Frame, error) {
+		return ReadFrame(connection)
+	})
+}
+
+func relaySingleStreamFrames(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, readFrame func() (Frame, error)) error {
 	sendWindow := newSendWindow()
 	receiveWindow := newSendWindow()
 	clientFinished := make(chan struct{}, 1)
 	results := make(chan relayResult, 2)
 	go func() {
-		results <- relayResult{direction: relayUplinkDirection, err: relayUplink(connection, writer, link, sendWindow, receiveWindow, clientFinished)}
+		results <- relayResult{direction: relayUplinkDirection, err: relayUplinkFrames(connection, writer, link, sendWindow, receiveWindow, clientFinished, readFrame)}
 	}()
 	go func() {
 		results <- relayResult{direction: relayDownlinkDirection, err: relayDownlink(ctx, writer, link, sendWindow)}
@@ -526,6 +570,12 @@ func abortTransport(connection io.Closer) {
 }
 
 func relayUplink(connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, sendWindow, receiveWindow *sendWindow, clientFinished chan<- struct{}) error {
+	return relayUplinkFrames(connection, writer, link, sendWindow, receiveWindow, clientFinished, func() (Frame, error) {
+		return ReadFrame(connection)
+	})
+}
+
+func relayUplinkFrames(connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, sendWindow, receiveWindow *sendWindow, clientFinished chan<- struct{}, readFrame func() (Frame, error)) error {
 	queue := newUplinkQueue()
 	pumpDone := make(chan error, 1)
 	go func() {
@@ -536,7 +586,7 @@ func relayUplink(connection io.ReadWriteCloser, writer *lockedFrameWriter, link 
 		}
 	}()
 
-	readErr := readUplinkFrames(connection, queue, sendWindow, receiveWindow)
+	readErr := readUplinkFrameSource(readFrame, queue, sendWindow, receiveWindow)
 	select {
 	case pumpErr := <-pumpDone:
 		if pumpErr != nil {
@@ -561,9 +611,13 @@ func relayUplink(connection io.ReadWriteCloser, writer *lockedFrameWriter, link 
 }
 
 func readUplinkFrames(connection io.Reader, queue *uplinkQueue, sendWindow, receiveWindow *sendWindow) error {
+	return readUplinkFrameSource(func() (Frame, error) { return ReadFrame(connection) }, queue, sendWindow, receiveWindow)
+}
+
+func readUplinkFrameSource(readFrame func() (Frame, error), queue *uplinkQueue, sendWindow, receiveWindow *sendWindow) error {
 	clientWriteClosed := false
 	for {
-		frame, err := ReadFrame(connection)
+		frame, err := readFrame()
 		if err != nil {
 			if clientWriteClosed && errors.Is(err, io.EOF) {
 				return nil
@@ -720,10 +774,10 @@ func replenishReceiveWindow(writer *lockedFrameWriter, window *sendWindow, amoun
 	if err := window.update(ClientStreamID, uint32(amount)); err != nil {
 		return err
 	}
-	if err := writer.write(Frame{Type: FrameWindowUpdate, Payload: increment}); err != nil {
-		return err
-	}
-	return writer.write(Frame{Type: FrameWindowUpdate, StreamID: ClientStreamID, Payload: increment})
+	return writer.writeFrames(
+		Frame{Type: FrameWindowUpdate, Payload: increment},
+		Frame{Type: FrameWindowUpdate, StreamID: ClientStreamID, Payload: increment},
+	)
 }
 
 func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transport.Link, window *sendWindow) error {

@@ -40,6 +40,7 @@ const (
 	SettingKeepaliveIntervalHint    = uint16(0x0004)
 	SettingPaddingProfileVersionAck = uint16(0x0005)
 	SettingResumptionTicketOffered  = uint16(0x0006)
+	SettingSessionReuse             = uint16(0x0007)
 	settingEncodedLength            = 6
 	addressTypeIPv4                 = byte(0x01)
 	addressTypeDomain               = byte(0x03)
@@ -58,7 +59,11 @@ type Setting struct {
 }
 
 func (frame Frame) MarshalBinary() ([]byte, error) {
-	if err := validateFrame(frame.Type, frame.StreamID, len(frame.Payload)); err != nil {
+	return frame.marshal(1)
+}
+
+func (frame Frame) marshal(wireVersion uint32) ([]byte, error) {
+	if err := validateFrameForWire(wireVersion, frame.Type, frame.StreamID, len(frame.Payload)); err != nil {
 		return nil, err
 	}
 	encoded := make([]byte, FrameHeaderLength+len(frame.Payload))
@@ -70,13 +75,17 @@ func (frame Frame) MarshalBinary() ([]byte, error) {
 }
 
 func ReadFrame(reader io.Reader) (Frame, error) {
+	return readFrame(reader, 1)
+}
+
+func readFrame(reader io.Reader, wireVersion uint32) (Frame, error) {
 	var header [FrameHeaderLength]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return Frame{}, err
 	}
 	payloadLength := readUint24(header[5:8])
 	streamID := binary.BigEndian.Uint32(header[1:5])
-	if err := validateFrame(header[0], streamID, payloadLength); err != nil {
+	if err := validateFrameForWire(wireVersion, header[0], streamID, payloadLength); err != nil {
 		return Frame{}, err
 	}
 	frame := Frame{
@@ -246,6 +255,10 @@ func decodeDestination(payload []byte, network xnet.Network) (xnet.Destination, 
 }
 
 func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
+	return validateFrameForWire(1, frameType, streamID, payloadLength)
+}
+
+func validateFrameForWire(wireVersion uint32, frameType byte, streamID uint32, payloadLength int) error {
 	if payloadLength > MaxFramePayload {
 		return errors.New("ArtX frame payload is too large")
 	}
@@ -261,15 +274,19 @@ func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
 			return errors.New("ArtX connection frame has a stream ID")
 		}
 	case FrameTCPSyn, FrameData, FrameFin, FrameRST, FrameUDPAssoc, FrameDatagram:
-		if streamID != ClientStreamID {
+		if !validStreamID(wireVersion, streamID) {
 			return errors.New("ArtX stream frame has an invalid stream ID")
 		}
 	case FrameWindowUpdate:
-		if streamID != 0 && streamID != ClientStreamID {
+		if streamID != 0 && !validStreamID(wireVersion, streamID) {
 			return errors.New("ArtX WINDOW_UPDATE has an invalid stream ID")
 		}
 	}
 	return nil
+}
+
+func validStreamID(wireVersion, streamID uint32) bool {
+	return streamID == ClientStreamID || wireVersion == 2 && streamID != 0 && streamID&1 == 1
 }
 
 func putUint24(destination []byte, value int) {

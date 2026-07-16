@@ -115,7 +115,7 @@ func TestArtXInboundConfigRejectsInvalidBoundaryValues(t *testing.T) {
 	tests := []ArtXServerConfig{
 		{Users: []*ArtXUser{{PSK: "   "}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, WireVersion: 1, ProfileVersion: 1},
-		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 2, ProfileVersion: 1},
+		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 3, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 4},
 	}

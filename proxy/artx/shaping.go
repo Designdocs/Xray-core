@@ -40,8 +40,12 @@ type serverSettingsFlight struct {
 }
 
 func newServerSettingsFlight(profileVersion uint32, psk, salt []byte) (serverSettingsFlight, error) {
+	return newServerSettingsFlightForWire(1, profileVersion, psk, salt)
+}
+
+func newServerSettingsFlightForWire(wireVersion, profileVersion uint32, psk, salt []byte) (serverSettingsFlight, error) {
 	if profileVersion == profileVersionUnshaped {
-		encoded, err := marshalSettingsFrame(settingsList(profileVersion))
+		encoded, err := marshalSettingsFrame(settingsListForWire(wireVersion, profileVersion))
 		if err != nil {
 			return serverSettingsFlight{}, err
 		}
@@ -65,9 +69,9 @@ func newServerSettingsFlight(profileVersion uint32, psk, salt []byte) (serverSet
 	var flight serverSettingsFlight
 	switch template {
 	case settingsFlightGreased:
-		flight, err = newGreasedSettingsFlight(profileVersion, seed)
+		flight, err = newGreasedSettingsFlightForWire(wireVersion, profileVersion, seed)
 	case settingsFlightPadded:
-		flight, err = newPaddedSettingsFlight(profileVersion, seed)
+		flight, err = newPaddedSettingsFlightForWire(wireVersion, profileVersion, seed)
 	default:
 		return serverSettingsFlight{}, errors.New("artx: invalid settings flight template")
 	}
@@ -100,11 +104,15 @@ func selectSettingsFlightTemplate(reader io.Reader) (settingsFlightTemplate, err
 }
 
 func newGreasedSettingsFlight(profileVersion uint32, reader io.Reader) (serverSettingsFlight, error) {
+	return newGreasedSettingsFlightForWire(1, profileVersion, reader)
+}
+
+func newGreasedSettingsFlightForWire(wireVersion, profileVersion uint32, reader io.Reader) (serverSettingsFlight, error) {
 	var value [4]byte
 	if _, err := io.ReadFull(reader, value[:]); err != nil {
 		return serverSettingsFlight{}, err
 	}
-	settings := append(settingsList(profileVersion), Setting{
+	settings := append(settingsListForWire(wireVersion, profileVersion), Setting{
 		Key: settingsGreaseKey, Value: binary.BigEndian.Uint32(value[:]),
 	})
 	encoded, err := marshalSettingsFrame(settings)
@@ -115,7 +123,11 @@ func newGreasedSettingsFlight(profileVersion uint32, reader io.Reader) (serverSe
 }
 
 func newPaddedSettingsFlight(profileVersion uint32, reader io.Reader) (serverSettingsFlight, error) {
-	settings, err := marshalSettingsFrame(settingsList(profileVersion))
+	return newPaddedSettingsFlightForWire(1, profileVersion, reader)
+}
+
+func newPaddedSettingsFlightForWire(wireVersion, profileVersion uint32, reader io.Reader) (serverSettingsFlight, error) {
+	settings, err := marshalSettingsFrame(settingsListForWire(wireVersion, profileVersion))
 	if err != nil {
 		return serverSettingsFlight{}, err
 	}
