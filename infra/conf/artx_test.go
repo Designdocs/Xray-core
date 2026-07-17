@@ -73,6 +73,24 @@ func TestArtXInboundConfigBuildsFallback(t *testing.T) {
 	}
 }
 
+func TestArtXInboundConfigBuildsIsolatedWireV3(t *testing.T) {
+	config := &ArtXServerConfig{
+		Users:          []*ArtXUser{{PSK: "secret"}},
+		TLSSettings:    &TLSConfig{},
+		WireVersion:    3,
+		ProfileVersion: 1,
+		Fallback:       &ArtXFallbackConfig{Enabled: true, Origin: "http://127.0.0.1:60443/"},
+	}
+	built, err := config.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := built.(*artx.ServerConfig)
+	if server.WireVersion != 3 || server.ProfileVersion != 1 || server.UdpEnabled || server.Fallback == nil || !server.Fallback.Enabled {
+		t.Fatalf("wire-v3 config = %#v", server)
+	}
+}
+
 func TestArtXInboundConfigValidatesFallback(t *testing.T) {
 	tests := []struct {
 		name     string

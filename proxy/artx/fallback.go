@@ -316,16 +316,7 @@ func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection ne
 		if protocol == http2.NextProtoTLS {
 			_ = connection.SetReadDeadline(deadline)
 		}
-		requestCtx, cancel := context.WithTimeout(request.Context(), timeout)
-		defer cancel()
-		observer := &fallbackRequestObserver{onError: state.MarkFailed}
-		request = request.WithContext(context.WithValue(requestCtx, fallbackErrorObserverKey{}, observer))
-		if request.ContentLength > maxFallbackBodyBytes {
-			http.Error(writer, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		request.Body = http.MaxBytesReader(writer, request.Body, maxFallbackBodyBytes)
-		handler.proxy.ServeHTTP(writer, request)
+		handler.proxyRequest(writer, request, timeout, false, state.MarkFailed)
 	})
 	buffered := &prefixedConnection{Conn: connection, reader: io.MultiReader(bytes.NewReader(prefix), connection)}
 	if protocol == http2.NextProtoTLS {
@@ -374,6 +365,22 @@ func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection ne
 		state.MarkFailed()
 	}
 	return state.Err()
+}
+
+func (handler *HTTPFallback) proxyRequest(writer http.ResponseWriter, request *http.Request, timeout time.Duration, stripAuthorization bool, onError func()) {
+	requestCtx, cancel := context.WithTimeout(request.Context(), timeout)
+	defer cancel()
+	observer := &fallbackRequestObserver{onError: onError}
+	request = request.WithContext(context.WithValue(requestCtx, fallbackErrorObserverKey{}, observer))
+	if stripAuthorization {
+		request.Header.Del("Authorization")
+	}
+	if request.ContentLength > maxFallbackBodyBytes {
+		http.Error(writer, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxFallbackBodyBytes)
+	handler.proxy.ServeHTTP(writer, request)
 }
 
 func http2ParserWindow(total time.Duration) time.Duration {

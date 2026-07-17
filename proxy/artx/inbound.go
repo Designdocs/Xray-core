@@ -3,6 +3,7 @@ package artx
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -45,6 +46,7 @@ type Server struct {
 	wireVersion    uint32
 	profileVersion uint32
 	udpEnabled     bool
+	wireV3DummyPSK [wireV3TagLength]byte
 	now            func() time.Time
 }
 
@@ -52,8 +54,11 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config == nil || config.TlsSettings == nil || len(config.TlsSettings.Certificate) == 0 {
 		return nil, errors.New("artx: TLS certificate is required")
 	}
-	if config.WireVersion != 1 && config.WireVersion != 2 {
+	if config.WireVersion != 1 && config.WireVersion != 2 && config.WireVersion != 3 {
 		return nil, fmt.Errorf("artx: unsupported wire version %d", config.WireVersion)
+	}
+	if config.WireVersion == 3 && (config.ProfileVersion != 1 || config.UdpEnabled || config.Fallback == nil || !config.Fallback.Enabled) {
+		return nil, errors.New("artx: wire-v3 requires profile version 1, TCP-only, and enabled fallback")
 	}
 	if config.ProfileVersion < profileVersionUnshaped || config.ProfileVersion > profileVersionTimedRecordShaping {
 		return nil, fmt.Errorf("artx: unsupported profile version %d", config.ProfileVersion)
@@ -83,6 +88,11 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		profileVersion: config.ProfileVersion,
 		udpEnabled:     config.UdpEnabled,
 		now:            time.Now,
+	}
+	if config.WireVersion == 3 {
+		if _, err := rand.Read(server.wireV3DummyPSK[:]); err != nil {
+			return nil, fmt.Errorf("artx: initialize wire-v3 dummy key: %w", err)
+		}
 	}
 	if instance := core.FromContext(ctx); instance != nil {
 		server.stats.manager, _ = instance.GetFeature(featurestats.ManagerType()).(featurestats.Manager)
@@ -139,6 +149,16 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	state := tlsConnection.ConnectionState()
 	if state.Version != tls.VersionTLS13 {
 		return s.handlePreAuthFailure(ctx, tlsConnection, nil, errors.New("artx: TLS 1.3 is required"))
+	}
+	if s.wireVersion == 3 {
+		if state.NegotiatedProtocol != "h2" {
+			return s.serveFallback(ctx, tlsConnection, nil)
+		}
+		exporter, err := state.ExportKeyingMaterial(wireV3ExporterLabel, nil, wireV3ExporterLength)
+		if err != nil {
+			return s.handlePreAuthFailure(ctx, tlsConnection, nil, fmt.Errorf("artx: wire-v3 TLS exporter: %w", err))
+		}
+		return s.processWireV3(ctx, tlsConnection, dispatcher, exporter, state.ServerName)
 	}
 	exporter, err := state.ExportKeyingMaterial(exporterLabel, nil, ExporterLength)
 	if err != nil {
@@ -238,6 +258,13 @@ func (s *Server) handlePreAuthFailure(ctx context.Context, connection *tls.Conn,
 	}
 	if s.fallback == nil {
 		return authErr
+	}
+	return s.serveFallback(ctx, connection, prefix)
+}
+
+func (s *Server) serveFallback(ctx context.Context, connection *tls.Conn, prefix []byte) error {
+	if s.fallback == nil {
+		return errors.New("artx: fallback is not configured")
 	}
 	s.stats.add(runtimeCounterFallbackHits, 1)
 	_ = connection.SetDeadline(time.Time{})
