@@ -27,7 +27,11 @@ const (
 	fullHandlerKey            ctx.SessionKey = 10 // outbound gets full handler
 	mitmAlpn11Key             ctx.SessionKey = 11 // used by TLS dialer
 	mitmServerNameKey         ctx.SessionKey = 12 // used by TLS dialer
-	outboundReadyObserverKey  ctx.SessionKey = 13 // outbound connection readiness observer
+
+	streamSettingsKey ctx.SessionKey = 13
+
+	// ArtX keys start at 1000 so upstream's sequential numbering never collides.
+	outboundReadyObserverKey ctx.SessionKey = 1000 // outbound connection readiness observer
 )
 
 type OutboundReadyObserver func(stdnet.Conn, net.Destination)
@@ -213,4 +217,12 @@ func MitmServerNameFromContext(ctx context.Context) string {
 		return val
 	}
 	return ""
+}
+
+func ContextWithStreamSettings(ctx context.Context, streamSettings any) context.Context {
+	return context.WithValue(ctx, streamSettingsKey, streamSettings)
+}
+
+func StreamSettingsFromContext(ctx context.Context) any {
+	return ctx.Value(streamSettingsKey)
 }

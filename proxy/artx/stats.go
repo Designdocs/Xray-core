@@ -78,10 +78,7 @@ func (counters *runtimeCounters) bind(inboundTag string) {
 		return
 	}
 	for metric := runtimeCounter(0); metric < runtimeCounterCount; metric++ {
-		counter, _ := featurestats.GetOrRegisterCounter(
-			counters.manager,
-			runtimeCounterName(inboundTag, metric),
-		)
+		counter, _ := counters.manager.GetOrRegisterCounter(runtimeCounterName(inboundTag, metric))
 		counters.managed[metric] = counter
 	}
 	counters.managedBound.Store(true)

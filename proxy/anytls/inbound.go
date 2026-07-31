@@ -33,6 +33,7 @@ type Server struct {
 	pendingMu      sync.Mutex
 	updateCh       chan struct{}
 	stopCh         chan struct{}
+	closeOnce      sync.Once
 	debounce       time.Duration
 	paddingScheme  string
 }
@@ -73,6 +74,12 @@ func (s *Server) Network() []xnet.Network {
 	return []xnet.Network{xnet.Network_TCP, xnet.Network_UNIX}
 }
 
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() { close(s.stopCh) })
+	return nil
+}
+
+
 func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Connection, dispatcher routing.Dispatcher) error {
 	sessPol := s.policyManager.ForLevel(0)
 	_ = conn.SetReadDeadline(time.Now().Add(sessPol.Timeouts.Handshake))
@@ -88,6 +95,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 	}
 	sess.fw = newFrameWriter(sess.bw)
 	sess.peerVersion = 1
+	defer sess.close(nil)
 
 	// auth header: 32B sha256(password) + 2B padlen
 	var h [34]byte
