@@ -917,7 +917,8 @@ type testDispatcher struct {
 	link *transport.Link
 }
 
-func (dispatcher *testDispatcher) Dispatch(context.Context, xnet.Destination) (*transport.Link, error) {
+func (dispatcher *testDispatcher) Dispatch(ctx context.Context, destination xnet.Destination) (*transport.Link, error) {
+	session.NotifyOutboundReady(ctx, nil, destination)
 	return dispatcher.link, nil
 }
 func (*testDispatcher) DispatchLink(context.Context, xnet.Destination, *transport.Link) error {

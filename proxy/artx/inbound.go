@@ -39,26 +39,28 @@ type Server struct {
 	users    map[[UserLocatorLength]byte]*protocol.MemoryUser
 	locators map[string][UserLocatorLength]byte
 
-	tlsConfig      *tls.Config
-	replay         *replayCache
-	fallback       FallbackHandler
-	stats          runtimeCounters
-	wireVersion    uint32
-	profileVersion uint32
-	udpEnabled     bool
-	wireV3DummyPSK [wireV3TagLength]byte
-	now            func() time.Time
+	tlsConfig       *tls.Config
+	replay          *replayCache
+	fallback        FallbackHandler
+	stats           runtimeCounters
+	wireVersion     uint32
+	profileVersion  uint32
+	udpEnabled      bool
+	wireV3DummyPSK  [wireV3TagLength]byte
+	wireV4DummyPSK  [wireV4TagLength]byte
+	now             func() time.Time
+	targetReadyWait time.Duration
 }
 
 func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if config == nil || config.TlsSettings == nil || len(config.TlsSettings.Certificate) == 0 {
 		return nil, errors.New("artx: TLS certificate is required")
 	}
-	if config.WireVersion != 1 && config.WireVersion != 2 && config.WireVersion != 3 {
+	if config.WireVersion != 1 && config.WireVersion != 2 && config.WireVersion != 3 && config.WireVersion != 4 {
 		return nil, fmt.Errorf("artx: unsupported wire version %d", config.WireVersion)
 	}
-	if config.WireVersion == 3 && (config.ProfileVersion != 1 || config.UdpEnabled || config.Fallback == nil || !config.Fallback.Enabled) {
-		return nil, errors.New("artx: wire-v3 requires profile version 1, TCP-only, and enabled fallback")
+	if (config.WireVersion == 3 || config.WireVersion == 4) && (config.ProfileVersion != 1 || config.UdpEnabled || config.Fallback == nil || !config.Fallback.Enabled) {
+		return nil, fmt.Errorf("artx: wire-v%d requires profile version 1, TCP-only, and enabled fallback", config.WireVersion)
 	}
 	if config.ProfileVersion < profileVersionUnshaped || config.ProfileVersion > profileVersionTimedRecordShaping {
 		return nil, fmt.Errorf("artx: unsupported profile version %d", config.ProfileVersion)
@@ -80,18 +82,28 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	tlsConfig.MinVersion = tls.VersionTLS13
 	tlsConfig.MaxVersion = tls.VersionTLS13
 	tlsConfig.SessionTicketsDisabled = true
-	tlsConfig.NextProtos = appendUnique(tlsConfig.NextProtos, "h2", "http/1.1")
+	if config.WireVersion == 4 {
+		tlsConfig.NextProtos = []string{"http/1.1"}
+	} else {
+		tlsConfig.NextProtos = appendUnique(tlsConfig.NextProtos, "h2", "http/1.1")
+	}
 	server := &Server{
-		tlsConfig:      tlsConfig,
-		replay:         newReplayCache(replayCacheCapacity, replayCacheTTL, time.Now),
-		wireVersion:    config.WireVersion,
-		profileVersion: config.ProfileVersion,
-		udpEnabled:     config.UdpEnabled,
-		now:            time.Now,
+		tlsConfig:       tlsConfig,
+		replay:          newReplayCache(replayCacheCapacity, replayCacheTTL, time.Now),
+		wireVersion:     config.WireVersion,
+		profileVersion:  config.ProfileVersion,
+		udpEnabled:      config.UdpEnabled,
+		now:             time.Now,
+		targetReadyWait: wireV4TargetReadyWait,
 	}
 	if config.WireVersion == 3 {
 		if _, err := rand.Read(server.wireV3DummyPSK[:]); err != nil {
 			return nil, fmt.Errorf("artx: initialize wire-v3 dummy key: %w", err)
+		}
+	}
+	if config.WireVersion == 4 {
+		if _, err := rand.Read(server.wireV4DummyPSK[:]); err != nil {
+			return nil, fmt.Errorf("artx: initialize wire-v4 dummy key: %w", err)
 		}
 	}
 	if instance := core.FromContext(ctx); instance != nil {
@@ -128,6 +140,11 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if connection == nil || dispatcher == nil {
 		return errors.New("artx: connection and dispatcher are required")
 	}
+	r0Hook := newR0ServerHook(connection, s.wireVersion)
+	defer closeR0ServerHook(r0Hook)
+	if s.wireVersion != 4 {
+		ctx = contextWithR0TargetReady(ctx, r0Hook)
+	}
 	if inbound := session.InboundFromContext(ctx); inbound != nil {
 		s.stats.bind(inbound.Tag)
 	}
@@ -146,6 +163,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if err := tlsConnection.HandshakeContext(ctx); err != nil {
 		return fmt.Errorf("artx: TLS handshake: %w", err)
 	}
+	emitR0ServerEvent(r0Hook, r0ServerEventTLSReady, 1)
 	state := tlsConnection.ConnectionState()
 	if state.Version != tls.VersionTLS13 {
 		return s.handlePreAuthFailure(ctx, tlsConnection, nil, errors.New("artx: TLS 1.3 is required"))
@@ -159,6 +177,16 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 			return s.handlePreAuthFailure(ctx, tlsConnection, nil, fmt.Errorf("artx: wire-v3 TLS exporter: %w", err))
 		}
 		return s.processWireV3(ctx, tlsConnection, dispatcher, exporter, state.ServerName)
+	}
+	if s.wireVersion == 4 {
+		if state.NegotiatedProtocol != "http/1.1" {
+			return s.serveFallback(ctx, tlsConnection, nil)
+		}
+		exporter, err := state.ExportKeyingMaterial(wireV4ExporterLabel, nil, wireV4ExporterLength)
+		if err != nil {
+			return s.handlePreAuthFailure(ctx, tlsConnection, nil, fmt.Errorf("artx: wire-v4 TLS exporter: %w", err))
+		}
+		return s.processWireV4(ctx, tlsConnection, dispatcher, exporter, state.ServerName, r0Hook)
 	}
 	exporter, err := state.ExportKeyingMaterial(exporterLabel, nil, ExporterLength)
 	if err != nil {
@@ -174,6 +202,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 		return s.handlePreAuthFailure(ctx, tlsConnection, capture.Bytes(), err)
 	}
 	s.stats.add(runtimeCounterAuthenticationSuccess, 1)
+	emitR0ServerEvent(r0Hook, r0ServerEventOpenAccepted, 1)
 	_ = connection.SetDeadline(time.Time{})
 
 	if inbound := session.InboundFromContext(ctx); inbound != nil {
@@ -200,6 +229,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if settingsWriteErr != nil {
 		return fmt.Errorf("artx: write server SETTINGS flight: %w", settingsWriteErr)
 	}
+	emitR0ServerEvent(r0Hook, r0ServerEventPeerAccept, 1)
 	peerSettings, err := ReadFrame(tlsConnection)
 	if err != nil {
 		return err
@@ -214,6 +244,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	if err := validatePeerSettingsForWire(settings, s.wireVersion, s.profileVersion); err != nil {
 		return err
 	}
+	emitR0ServerEvent(r0Hook, r0ServerEventInnerExposed, 1)
 	if s.wireVersion == 2 {
 		return s.processReusableSession(ctx, tlsConnection, dispatcher)
 	}
@@ -232,7 +263,8 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 		if err != nil {
 			return fmt.Errorf("artx: dispatch: %w", err)
 		}
-		return relaySingleStream(ctx, tlsConnection, writer, link)
+		emitR0ServerEvent(r0Hook, r0ServerEventDispatchReturn, 1)
+		return relaySingleStream(ctx, tlsConnection, writer, observeR0ServerLink(link, r0Hook))
 	case FrameUDPAssoc:
 		if !s.udpEnabled {
 			return errors.New("artx: UDP is disabled")
@@ -834,9 +866,21 @@ func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transpo
 	}
 }
 
-func relayUDPAssociation(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, dispatcher routing.Dispatcher, destination xnet.Destination) error {
+func relayUDPAssociation(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, dispatcher routing.Dispatcher, destination xnet.Destination) (relayErr error) {
 	relayCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	lifecycle := newUDPAssociationLifecycle()
+	terminalReason := "relay_complete"
+	if lifecycle != nil {
+		defer func() {
+			if relayErr != nil && terminalReason == "relay_complete" {
+				terminalReason = "relay_error"
+			}
+			if traceErr := lifecycle.Close(terminalReason); relayErr == nil && traceErr != nil {
+				relayErr = traceErr
+			}
+		}()
+	}
 
 	sendWindow := newSendWindow()
 	receiveWindow := newSendWindow()
@@ -871,8 +915,10 @@ func relayUDPAssociation(ctx context.Context, connection io.ReadWriteCloser, wri
 			default:
 			}
 			if clientFinished && errors.Is(err, io.EOF) {
+				terminalReason = "client_fin_complete"
 				return nil
 			}
+			terminalReason = "read_error"
 			return err
 		}
 		switch frame.Type {
@@ -883,6 +929,11 @@ func relayUDPAssociation(ctx context.Context, connection io.ReadWriteCloser, wri
 			payload, err := DecodeDatagram(frame.Payload)
 			if err != nil {
 				return err
+			}
+			if lifecycle != nil {
+				if err := lifecycle.Observe(payload); err != nil {
+					return err
+				}
 			}
 			if err := receiveWindow.consume(len(frame.Payload)); err != nil {
 				return err
@@ -899,11 +950,13 @@ func relayUDPAssociation(ctx context.Context, connection io.ReadWriteCloser, wri
 			}
 			clientFinished = true
 			udpDispatcher.RemoveRay()
+			terminalReason = "client_fin"
 			return writer.write(Frame{Type: FrameFin, StreamID: ClientStreamID})
 		case FrameRST:
 			if len(frame.Payload) != 1 {
 				return errors.New("artx: invalid UDP RST")
 			}
+			terminalReason = "client_rst"
 			return nil
 		case FrameWindowUpdate:
 			increment, err := DecodeWindowUpdate(frame.Payload)

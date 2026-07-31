@@ -73,21 +73,23 @@ func TestArtXInboundConfigBuildsFallback(t *testing.T) {
 	}
 }
 
-func TestArtXInboundConfigBuildsIsolatedWireV3(t *testing.T) {
-	config := &ArtXServerConfig{
-		Users:          []*ArtXUser{{PSK: "secret"}},
-		TLSSettings:    &TLSConfig{},
-		WireVersion:    3,
-		ProfileVersion: 1,
-		Fallback:       &ArtXFallbackConfig{Enabled: true, Origin: "http://127.0.0.1:60443/"},
-	}
-	built, err := config.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := built.(*artx.ServerConfig)
-	if server.WireVersion != 3 || server.ProfileVersion != 1 || server.UdpEnabled || server.Fallback == nil || !server.Fallback.Enabled {
-		t.Fatalf("wire-v3 config = %#v", server)
+func TestArtXInboundConfigBuildsIsolatedHTTPWires(t *testing.T) {
+	for _, wireVersion := range []uint32{3, 4} {
+		config := &ArtXServerConfig{
+			Users:          []*ArtXUser{{PSK: "secret"}},
+			TLSSettings:    &TLSConfig{},
+			WireVersion:    wireVersion,
+			ProfileVersion: 1,
+			Fallback:       &ArtXFallbackConfig{Enabled: true, Origin: "http://127.0.0.1:60443/"},
+		}
+		built, err := config.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := built.(*artx.ServerConfig)
+		if server.WireVersion != wireVersion || server.ProfileVersion != 1 || server.UdpEnabled || server.Fallback == nil || !server.Fallback.Enabled {
+			t.Fatalf("wire-v%d config = %#v", wireVersion, server)
+		}
 	}
 }
 
@@ -134,6 +136,7 @@ func TestArtXInboundConfigRejectsInvalidBoundaryValues(t *testing.T) {
 		{Users: []*ArtXUser{{PSK: "   "}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, WireVersion: 1, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 3, ProfileVersion: 1},
+		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 4, ProfileVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1},
 		{Users: []*ArtXUser{{PSK: "secret"}}, TLSSettings: &TLSConfig{}, WireVersion: 1, ProfileVersion: 4},
 	}

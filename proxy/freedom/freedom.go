@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
+	stdnet "net"
 	"strings"
 	"time"
 
@@ -353,7 +354,6 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		if err != nil {
 			return err
 		}
-
 		conn = rawConn
 		return nil
 	})
@@ -375,15 +375,17 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 		return nil
 	}
+	var proxyProtocolSource stdnet.Addr
 	if h.config.ProxyProtocol > 0 && h.config.ProxyProtocol <= 2 {
-		version := byte(h.config.ProxyProtocol)
-		srcAddr := inbound.Source.RawNetAddr()
-		dstAddr := conn.RemoteAddr()
-		header := proxyproto.HeaderProxyFromAddrs(version, srcAddr, dstAddr)
-		if _, err = header.WriteTo(conn); err != nil {
+		if inbound == nil {
 			conn.Close()
-			return errors.New("failed to set PROXY protocol v", version).Base(err)
+			return errors.New("inbound session is required for PROXY protocol")
 		}
+		proxyProtocolSource = inbound.Source.RawNetAddr()
+	}
+	if err := prepareTargetConnection(ctx, conn, destination, byte(h.config.ProxyProtocol), proxyProtocolSource); err != nil {
+		conn.Close()
+		return err
 	}
 	defer conn.Close()
 	errors.LogInfo(ctx, "connection opened to ", destination, ", local endpoint ", conn.LocalAddr(), ", remote endpoint ", conn.RemoteAddr())
@@ -470,6 +472,17 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		return errors.New("connection ends").Base(err)
 	}
 
+	return nil
+}
+
+func prepareTargetConnection(ctx context.Context, connection stdnet.Conn, destination net.Destination, proxyProtocolVersion byte, source stdnet.Addr) error {
+	if proxyProtocolVersion > 0 && proxyProtocolVersion <= 2 {
+		header := proxyproto.HeaderProxyFromAddrs(proxyProtocolVersion, source, connection.RemoteAddr())
+		if _, err := header.WriteTo(connection); err != nil {
+			return errors.New("failed to set PROXY protocol v", proxyProtocolVersion).Base(err)
+		}
+	}
+	session.NotifyOutboundReady(ctx, connection, destination)
 	return nil
 }
 

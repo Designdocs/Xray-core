@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	stdnet "net"
 	_ "unsafe"
 
 	"github.com/xtls/xray-core/common/ctx"
@@ -26,7 +27,28 @@ const (
 	fullHandlerKey            ctx.SessionKey = 10 // outbound gets full handler
 	mitmAlpn11Key             ctx.SessionKey = 11 // used by TLS dialer
 	mitmServerNameKey         ctx.SessionKey = 12 // used by TLS dialer
+	outboundReadyObserverKey  ctx.SessionKey = 13 // outbound connection readiness observer
 )
+
+type OutboundReadyObserver func(stdnet.Conn, net.Destination)
+
+func ContextWithOutboundReadyObserver(ctx context.Context, observer OutboundReadyObserver) context.Context {
+	previous, _ := ctx.Value(outboundReadyObserverKey).(OutboundReadyObserver)
+	if previous != nil && observer != nil {
+		next := observer
+		observer = func(connection stdnet.Conn, destination net.Destination) {
+			previous(connection, destination)
+			next(connection, destination)
+		}
+	}
+	return context.WithValue(ctx, outboundReadyObserverKey, observer)
+}
+
+func NotifyOutboundReady(ctx context.Context, connection stdnet.Conn, destination net.Destination) {
+	if observer, ok := ctx.Value(outboundReadyObserverKey).(OutboundReadyObserver); ok && observer != nil {
+		observer(connection, destination)
+	}
+}
 
 func ContextWithInbound(ctx context.Context, inbound *Inbound) context.Context {
 	return context.WithValue(ctx, inboundSessionKey, inbound)
