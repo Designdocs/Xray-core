@@ -19,6 +19,7 @@ import (
 	"time"
 
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/transport/internet/decoyfallback"
 	"golang.org/x/net/http2"
 )
 
@@ -61,9 +62,11 @@ func TestHTTPFallbackUsesDedicatedBoundedTransport(t *testing.T) {
 	if transport == nil || transport.DialContext == nil || transport.Proxy != nil {
 		t.Fatalf("transport = %#v", transport)
 	}
-	if transport.TLSHandshakeTimeout != fallbackTLSHandshakeTimeout ||
-		transport.ResponseHeaderTimeout != fallbackResponseHeaderTimeout ||
-		transport.MaxResponseHeaderBytes != maxFallbackHeaders ||
+	// The bounds live with the transport in decoyfallback now, so assert
+	// against that package rather than a local copy that could drift from it.
+	if transport.TLSHandshakeTimeout != decoyfallback.TLSHandshakeTimeout ||
+		transport.ResponseHeaderTimeout != decoyfallback.ResponseHeaderTimeout ||
+		transport.MaxResponseHeaderBytes != decoyfallback.MaxResponseHeaderBytes ||
 		transport.MaxConnsPerHost <= 0 {
 		t.Fatalf("transport bounds = %#v", transport)
 	}

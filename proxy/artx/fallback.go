@@ -12,12 +12,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/xtls/xray-core/transport/internet/decoyfallback"
 )
 
 var (
@@ -26,17 +27,16 @@ var (
 )
 
 const (
-	maxAuthFrameSize              = 2 + MaxSaltLength + UserLocatorLength + 4 + AuthTagLength + 2 + maxAuthPadding
-	maxFallbackBodyBytes          = 1 << 20
-	maxFallbackHeaders            = 16 << 10
-	fallbackConnectTimeout        = 3 * time.Second
-	fallbackTLSHandshakeTimeout   = 5 * time.Second
-	fallbackResponseHeaderTimeout = 5 * time.Second
-	fallbackRequestTimeout        = 10 * time.Second
-	fallbackLookaheadTimeout      = time.Second
-	maxHTTP2ParserWindow          = 2 * time.Second
-	minHTTP2ParserWindow          = 10 * time.Millisecond
-	maxHTTP2UploadWindow          = 64 << 10
+	maxAuthFrameSize     = 2 + MaxSaltLength + UserLocatorLength + 4 + AuthTagLength + 2 + maxAuthPadding
+	maxFallbackBodyBytes = 1 << 20
+	// Also bounds the HTTP/1 classification replay buffer and the wire servers'
+	// request headers, so it stays here rather than moving with the transport.
+	maxFallbackHeaders       = 16 << 10
+	fallbackRequestTimeout   = 10 * time.Second
+	fallbackLookaheadTimeout = time.Second
+	maxHTTP2ParserWindow     = 2 * time.Second
+	minHTTP2ParserWindow     = 10 * time.Millisecond
+	maxHTTP2UploadWindow     = 64 << 10
 )
 
 type FallbackHandler interface {
@@ -51,16 +51,15 @@ type HTTPFallback struct {
 }
 
 func ValidateFallbackOrigin(origin string) error {
-	_, err := parseFallbackOrigin(origin)
-	return err
+	return decoyfallback.ValidateOrigin(origin)
 }
 
 func NewHTTPFallback(origin string) (*HTTPFallback, error) {
-	parsed, err := parseFallbackOrigin(origin)
+	parsed, err := decoyfallback.ParseOrigin(origin)
 	if err != nil {
 		return nil, err
 	}
-	transport := newFallbackTransport(parsed)
+	transport := decoyfallback.NewTransport(parsed)
 	handler := &HTTPFallback{
 		origin:         parsed,
 		transport:      transport,
@@ -70,61 +69,6 @@ func NewHTTPFallback(origin string) (*HTTPFallback, error) {
 	return handler, nil
 }
 
-func parseFallbackOrigin(origin string) (*url.URL, error) {
-	parsed, err := url.Parse(origin)
-	if err != nil {
-		return nil, errors.New("invalid fallback origin")
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, errors.New("fallback origin must use http or https")
-	}
-	if parsed.Host == "" {
-		return nil, errors.New("fallback origin host required")
-	}
-	if parsed.User != nil {
-		return nil, errors.New("fallback origin must not contain credentials")
-	}
-	if parsed.Fragment != "" {
-		return nil, errors.New("fallback origin must not contain a fragment")
-	}
-	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-		return nil, errors.New("cleartext fallback origin must use a loopback host")
-	}
-	return parsed, nil
-}
-
-func isLoopbackHost(host string) bool {
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func newFallbackTransport(origin *url.URL) *http.Transport {
-	dialer := &net.Dialer{Timeout: fallbackConnectTimeout, KeepAlive: 30 * time.Second}
-	dialContext := dialer.DialContext
-	if origin.Scheme == "http" {
-		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil || !isLoopbackHost(host) {
-				return nil, errors.New("cleartext fallback dial rejected")
-			}
-			return dialer.DialContext(ctx, network, address)
-		}
-	}
-	return &http.Transport{
-		Proxy:                  nil,
-		DialContext:            dialContext,
-		ForceAttemptHTTP2:      true,
-		TLSHandshakeTimeout:    fallbackTLSHandshakeTimeout,
-		ResponseHeaderTimeout:  fallbackResponseHeaderTimeout,
-		ExpectContinueTimeout:  time.Second,
-		IdleConnTimeout:        30 * time.Second,
-		MaxIdleConns:           16,
-		MaxIdleConnsPerHost:    4,
-		MaxConnsPerHost:        16,
-		MaxResponseHeaderBytes: maxFallbackHeaders,
-	}
-}
-
 func (handler *HTTPFallback) newReverseProxy() *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Transport: handler.transport,
@@ -132,12 +76,12 @@ func (handler *HTTPFallback) newReverseProxy() *httputil.ReverseProxy {
 			path := request.In.URL.Path
 			rawQuery := request.In.URL.RawQuery
 			request.SetURL(handler.origin)
-			request.Out.URL.Path = joinOriginPath(handler.origin.Path, path)
+			request.Out.URL.Path = decoyfallback.JoinPaths(handler.origin.Path, path)
 			request.Out.URL.RawPath = ""
-			request.Out.URL.RawQuery = joinQueries(handler.origin.RawQuery, rawQuery)
+			request.Out.URL.RawQuery = decoyfallback.JoinQueries(handler.origin.RawQuery, rawQuery)
 			request.Out.Host = handler.origin.Host
 			request.Out.RemoteAddr = ""
-			stripForwardingHeaders(request.Out.Header)
+			decoyfallback.StripForwardingHeaders(request.Out.Header)
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
@@ -151,37 +95,6 @@ func (handler *HTTPFallback) newReverseProxy() *httputil.ReverseProxy {
 		return nil
 	}
 	return proxy
-}
-
-func joinOriginPath(base, path string) string {
-	switch {
-	case base == "":
-		return path
-	case path == "":
-		return base
-	case strings.HasSuffix(base, "/") && strings.HasPrefix(path, "/"):
-		return base + path[1:]
-	case !strings.HasSuffix(base, "/") && !strings.HasPrefix(path, "/"):
-		return base + "/" + path
-	default:
-		return base + path
-	}
-}
-
-func joinQueries(base, request string) string {
-	if base == "" {
-		return request
-	}
-	if request == "" {
-		return base
-	}
-	return base + "&" + request
-}
-
-func stripForwardingHeaders(headers http.Header) {
-	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port", "X-Real-IP"} {
-		headers.Del(name)
-	}
 }
 
 func (handler *HTTPFallback) Serve(ctx context.Context, connection net.Conn, prefix []byte) error {

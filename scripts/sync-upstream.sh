@@ -18,8 +18,10 @@ cd "$REPO_ROOT"
 BRANCH_REF="refs/heads/main"
 UPSTREAM_REF="refs/remotes/upstream/main"
 
-# Packages carrying ArtX code or its core hook points.
-ARTX_PACKAGES=(./proxy/artx/... ./common/session/... ./proxy/freedom/...)
+# Packages carrying this fork's code or its core hook points. decoyfallback is
+# here because it owns the origin validation and bounded transport that
+# proxy/artx now shares, so a regression there reaches both features.
+ARTX_PACKAGES=(./proxy/artx/... ./common/session/... ./proxy/freedom/... ./transport/internet/decoyfallback/...)
 
 # infra/conf holds the ArtX config loader, but its TestGeodataConfig needs
 # resources/geoip.dat, which is not in the tree. Run only the ArtX cases there.

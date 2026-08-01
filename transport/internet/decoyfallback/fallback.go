@@ -38,17 +38,21 @@ import (
 // rejection keeps returning the plain 404 it returned before.
 const OriginEnvironment = "N2X_DECOY_TRANSPORT_FALLBACK"
 
+// Bounds for any client that talks to a decoy origin. Exported because
+// proxy/artx builds its own connection level fallback on the same transport
+// and must not drift from these.
 const (
-	connectTimeout        = 3 * time.Second
-	tlsHandshakeTimeout   = 5 * time.Second
-	responseHeaderTimeout = 5 * time.Second
-	idleConnTimeout       = 30 * time.Second
-	maxResponseHeaders    = 16 << 10
-	// maxRequestBodyBytes caps what a rejected request may push to the decoy.
-	// Nothing legitimate arrives here: the decoy only answers GET and HEAD, and
-	// a request only reaches this path because its Host or Path did not match.
-	maxRequestBodyBytes = 1 << 20
+	ConnectTimeout         = 3 * time.Second
+	TLSHandshakeTimeout    = 5 * time.Second
+	ResponseHeaderTimeout  = 5 * time.Second
+	IdleConnTimeout        = 30 * time.Second
+	MaxResponseHeaderBytes = 16 << 10
 )
+
+// maxRequestBodyBytes caps what a rejected request may push to the decoy.
+// Nothing legitimate arrives here: the decoy only answers GET and HEAD, and a
+// request only reaches this path because its Host or Path did not match.
+const maxRequestBodyBytes = 1 << 20
 
 // resolved caches the proxy built for one exact environment value. A nil proxy
 // records "this value yields no fallback" so an unset or malformed origin is
@@ -121,26 +125,26 @@ func rebuild(origin string) *httputil.ReverseProxy {
 }
 
 func newReverseProxy(origin string) (*httputil.ReverseProxy, error) {
-	target, err := parseOrigin(origin)
+	target, err := ParseOrigin(origin)
 	if err != nil {
 		return nil, err
 	}
 
 	proxy := &httputil.ReverseProxy{
-		Transport: newTransport(target),
+		Transport: NewTransport(target),
 		Rewrite: func(request *httputil.ProxyRequest) {
 			path := request.In.URL.Path
 			rawQuery := request.In.URL.RawQuery
 			request.SetURL(target)
-			request.Out.URL.Path = joinPaths(target.Path, path)
+			request.Out.URL.Path = JoinPaths(target.Path, path)
 			request.Out.URL.RawPath = ""
-			request.Out.URL.RawQuery = joinQueries(target.RawQuery, rawQuery)
+			request.Out.URL.RawQuery = JoinQueries(target.RawQuery, rawQuery)
 			request.Out.Host = target.Host
 			request.Out.RemoteAddr = ""
 			// Rewrite starts from a clone of the inbound request, so a client
 			// supplied forwarding header would otherwise reach the decoy and
 			// hand it an attacker controlled client address to log.
-			stripForwardingHeaders(request.Out.Header)
+			StripForwardingHeaders(request.Out.Header)
 		},
 		// A dead decoy must look like a web server with a dead backend, not
 		// like a proxy leaking its own error text.
@@ -153,7 +157,18 @@ func newReverseProxy(origin string) (*httputil.ReverseProxy, error) {
 	return proxy, nil
 }
 
-func parseOrigin(origin string) (*url.URL, error) {
+// ValidateOrigin reports whether origin is a usable decoy origin.
+func ValidateOrigin(origin string) error {
+	_, err := ParseOrigin(origin)
+	return err
+}
+
+// ParseOrigin validates a decoy origin and returns it parsed.
+//
+// The rules are shared with proxy/artx so a single review covers both: the
+// scheme must be http or https, credentials and fragments are refused, and
+// cleartext is confined to loopback.
+func ParseOrigin(origin string) (*url.URL, error) {
 	parsed, err := url.Parse(origin)
 	if err != nil {
 		return nil, errors.New("invalid decoy origin")
@@ -183,8 +198,11 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func newTransport(target *url.URL) *http.Transport {
-	dialer := &net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}
+// NewTransport builds a bounded HTTP client transport for a decoy origin.
+// A cleartext origin is re-checked at dial time, so a hostname that starts
+// resolving off loopback cannot turn this into a relay out of the node.
+func NewTransport(target *url.URL) *http.Transport {
+	dialer := &net.Dialer{Timeout: ConnectTimeout, KeepAlive: 30 * time.Second}
 	dialContext := dialer.DialContext
 	if target.Scheme == "http" {
 		// The origin was checked once at parse time; re-check at dial time so a
@@ -202,18 +220,20 @@ func newTransport(target *url.URL) *http.Transport {
 		Proxy:                  nil,
 		DialContext:            dialContext,
 		ForceAttemptHTTP2:      true,
-		TLSHandshakeTimeout:    tlsHandshakeTimeout,
-		ResponseHeaderTimeout:  responseHeaderTimeout,
+		TLSHandshakeTimeout:    TLSHandshakeTimeout,
+		ResponseHeaderTimeout:  ResponseHeaderTimeout,
 		ExpectContinueTimeout:  time.Second,
-		IdleConnTimeout:        idleConnTimeout,
+		IdleConnTimeout:        IdleConnTimeout,
 		MaxIdleConns:           16,
 		MaxIdleConnsPerHost:    4,
 		MaxConnsPerHost:        16,
-		MaxResponseHeaderBytes: maxResponseHeaders,
+		MaxResponseHeaderBytes: MaxResponseHeaderBytes,
 	}
 }
 
-func joinPaths(base, path string) string {
+// JoinPaths joins an origin base path with a request path, collapsing the
+// duplicate separator rather than producing "//".
+func JoinPaths(base, path string) string {
 	switch {
 	case base == "":
 		return path
@@ -228,7 +248,8 @@ func joinPaths(base, path string) string {
 	}
 }
 
-func joinQueries(base, request string) string {
+// JoinQueries merges an origin query string with the request query string.
+func JoinQueries(base, request string) string {
 	if base == "" {
 		return request
 	}
@@ -238,7 +259,9 @@ func joinQueries(base, request string) string {
 	return base + "&" + request
 }
 
-func stripForwardingHeaders(headers http.Header) {
+// StripForwardingHeaders removes client supplied forwarding headers so a
+// forged value cannot hand the decoy an attacker chosen client address.
+func StripForwardingHeaders(headers http.Header) {
 	for _, name := range []string{
 		"Forwarded",
 		"X-Forwarded-For",

@@ -255,8 +255,8 @@ func TestJoinPaths(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if got := joinPaths(test.base, test.path); got != test.want {
-			t.Fatalf("joinPaths(%q, %q) = %q, want %q", test.base, test.path, got, test.want)
+		if got := JoinPaths(test.base, test.path); got != test.want {
+			t.Fatalf("JoinPaths(%q, %q) = %q, want %q", test.base, test.path, got, test.want)
 		}
 	}
 }
@@ -274,8 +274,8 @@ func TestJoinQueries(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if got := joinQueries(test.base, test.request); got != test.want {
-			t.Fatalf("joinQueries(%q, %q) = %q, want %q", test.base, test.request, got, test.want)
+		if got := JoinQueries(test.base, test.request); got != test.want {
+			t.Fatalf("JoinQueries(%q, %q) = %q, want %q", test.base, test.request, got, test.want)
 		}
 	}
 }
