@@ -73,6 +73,14 @@ report_pending() {
     <(git diff --name-only "$UPSTREAM_REF...HEAD" | sort) \
     <(git log --format="" --name-only "HEAD..$UPSTREAM_REF" | sort -u) \
     || true
+
+  # Upstream bug fixes we carry expire when upstream fixes the same defect.
+  # This is the moment to check, because after the merge our version has
+  # already won the conflict and the question stops being asked.
+  info "upstream patches we carry — check whether any can be dropped"
+  echo "scripts/upstream-patches.md"
+  grep -E '^### ' scripts/upstream-patches.md 2>/dev/null | sed 's/^### /  - /' \
+    || echo "  (no ledger found)"
 }
 
 cmd_check() {

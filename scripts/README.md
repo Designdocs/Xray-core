@@ -35,19 +35,90 @@ replace github.com/xtls/xray-core => github.com/Designdocs/Xray-core v0.0.0-<utc
 **Nothing reaches the nodes until that pin moves.** Merging upstream here and
 stopping is a half-done sync.
 
+That pin is also why this repo has one rule with no exceptions:
+
+> **Never rebase `main`. Never force-push it.**
+
+The pin is a commit hash, and N2X's `go.sum` records it. Rebasing orphans
+every commit that has ever been pinned, and once GitHub garbage collects them
+no older N2X version can be built again — there is no rolling back to the core
+the nodes ran three months ago. The patch-queue model, where a fork rebases its
+patches onto upstream to keep a clean diff, is the obvious idea here and it is
+the one that breaks this. Merge instead, always.
+
+`bump-n2x-pin.sh` tags each pinned commit `n2x/<date>`, because a
+pseudo-version is not something anyone recognises later. To find out what a
+node is running, read the pin in N2X's `go.mod` and look up the tag.
+
+## Branch model
+
+```
+main            integration branch — always mergeable, never rebased
+ ├─ feat/…      new protocols and features
+ └─ fix/…       bug fixes
+```
+
+`main` carries the work; upstream merges land **on `main`** via
+`sync-upstream.sh merge`, never on a feature branch. A feature branch that
+lives more than a few days should merge `main` into itself periodically — again
+merge, not rebase, since anything already pushed may have been pinned.
+
+Work on a branch rather than directly on `main` for one concrete reason: the
+history already contains `chore(artx): checkpoint rejected profile v2
+experiment` and `chore(artx): checkpoint wire v3 h2 experiment`. Wire went
+through four iterations before v4 stuck. Experiments are normal here, and they
+should die with their branch instead of settling into the trunk.
+
+`main` does not have to be perfect, because **the pin is the release gate**, not
+the branch. A rough commit on `main` reaches nobody until `bump-n2x-pin.sh`
+builds and tests N2X against it. Use that freedom to integrate early; do not use
+it to skip `verify`.
+
+## Two kinds of drift
+
+Divergence from upstream comes in two kinds and they need opposite treatment.
+
+| | Examples | Lifetime |
+|---|---|---|
+| **Feature hooks** | `proxy/artx/`, decoy fallback, the `freedom.go` readiness hook | permanent |
+| **Upstream bug fixes** | the splithttp data races | **until upstream fixes it** |
+
+The second kind rots if it is not tracked: a diverging fix in a file upstream
+keeps editing, whose reason nobody remembers. Prefix those commits
+`fix(upstream): …` and record them in
+[upstream-patches.md](./upstream-patches.md). `sync-upstream.sh check` prints
+the ledger so the question gets asked before the merge, not after.
+
+Adding a whole protocol costs **two upstream lines** — one registration in
+`infra/conf/xray.go`, one import in `main/distro/all/all.go`. If a new protocol
+costs more than that, the design is reaching into core when it should be
+appending to it.
+
 ## Procedure
 
 ```bash
-./scripts/sync-upstream.sh check     # what is waiting
+./scripts/sync-upstream.sh check     # what is waiting, and what patches we carry
 ./scripts/sync-upstream.sh merge     # back up, merge, build, vet, test
 git push origin HEAD                 # only after you have read the merge
-./scripts/bump-n2x-pin.sh            # propagate to N2X, build and test it
+./scripts/bump-n2x-pin.sh            # propagate to N2X, build, test, tag
+git push origin n2x/<date>           # the tag is local until you push it
 ```
 
 `merge` stops at the first conflict and prints the files. Resolve, `git
 commit`, then `./scripts/sync-upstream.sh verify`.
 
 Neither script commits or pushes. Both refuse to guess.
+
+**`rerere` is enabled on this clone.** Git records how you resolve a conflict
+and replays it the next time the same conflict shape appears, which is the
+normal case for a fork that merges the same upstream files release after
+release. It replays into the working tree but leaves the result unstaged on
+purpose — read it before you `git add`. A clone made elsewhere needs it turned
+on again:
+
+```bash
+git config rerere.enabled true
+```
 
 ## Keep the divergence additive
 

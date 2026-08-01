@@ -51,5 +51,34 @@ env "${N2X_BUILD_ENV[@]}" go build -tags "$N2X_BUILD_TAGS" ./... \
 info "testing N2X"
 env "${N2X_BUILD_ENV[@]}" go test -tags "$N2X_BUILD_TAGS" ./... || fail "N2X tests failed."
 
+# Name the commit the nodes will actually run. Upstream publishes no tags and
+# a pseudo-version is not something anyone recognises six months later, so
+# without this "which core is on my nodes" is answered by hash archaeology.
+# Tagging happens only after the build and tests pass: a tag is a claim.
+cd "$REPO_ROOT"
+tag_date="$(date -u +%Y-%m-%d)"
+tag="n2x/$tag_date"
+attempt=2
+while git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do
+  if [[ "$(git rev-parse "refs/tags/$tag^{commit}")" == "$COMMIT" ]]; then
+    info "already tagged: $tag"
+    tag=""
+    break
+  fi
+  # Same day, different commit — a second bump, not a re-run.
+  tag="n2x/$tag_date.$attempt"
+  attempt=$((attempt + 1))
+done
+if [[ -n "$tag" ]]; then
+  git tag -a "$tag" "$COMMIT" -m "N2X pinned $VERSION"
+  info "tagged: $tag"
+fi
+
 info "N2X pinned to $VERSION and verified"
-echo "Review and commit inside $N2X_DIR — this script never commits or pushes."
+cat <<NEXT
+Review and commit inside $N2X_DIR — this script never commits or pushes.
+
+The tag is local too:
+
+  git -C "$REPO_ROOT" push origin ${tag:-<tag>}
+NEXT
