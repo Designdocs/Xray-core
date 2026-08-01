@@ -91,20 +91,35 @@ EnvironmentFile=-/etc/N2X/artx-decoy.env
 
 注意方向：不能让 `transport/internet/*` 去 import `proxy/artx`（传输层依赖代理层，且有成环风险）。
 
-### 4.3 上游文件只改 6 行
+### 4.3 上游文件只改 4 行，且不动 import
 
-四处 `writer.WriteHeader(http.StatusNotFound)` 各替换为一行调用，两个文件各加一行 import：
+四处 `writer.WriteHeader(http.StatusNotFound)` 各替换为一行调用：
 
 ```go
 // 原
 writer.WriteHeader(http.StatusNotFound)
 // 改为
-decoyfallback.ServeOrNotFound(writer, request)
+internet.ServeDecoyOrNotFound(writer, request)
 ```
 
-`ServeOrNotFound` 在未启用或反代失败时原样写 `404`，行为完全兜底。
+`ServeDecoyOrNotFound` 在未启用或反代失败时原样写 `404`，行为完全兜底。
 
-**上游文件改动合计：2 个文件，6 行。** 对比现有漂移（49 文件 / 10598 行，其中上游文件仅 4 个、共 30 行），这个增量与既有约定同量级。
+**实施时的修正：调用的是 `internet.` 而不是 `decoyfallback.`。**
+
+原计划让 hub 直接调用 `decoyfallback`，需要各加一行 import。实施前 blame 了两个 import 块：
+
+```
+websocket/hub.go  import 块   2020-12 起基本冻结
+splithttp/hub.go  import 块   2026-03-09 / 2026-03-21 / 2026-04-05 三次新增
+```
+
+splithttp 的 import 块正在活跃增长，插入一行几乎必然在同步时冲突 —— 而 xhttp 恰好是主力传输。
+
+改为在 `transport/internet/` 下新增一个文件（新文件零冲突）放转发函数。两个 hub 本来就 import 了这个包，而且就在拒绝分支的上一行调用 `internet.IsValidHTTPHost`，所以调用点不需要任何 import 改动。
+
+**上游文件改动合计：2 个文件，4 行改动，0 行 import。** 现有漂移是 49 文件 / 10598 行，其中上游文件仅 4 个、共 30 行；这个增量低于既有约定。
+
+代价：往上游的 `internet` 包命名空间里加了一个符号，理论上未来可能和上游新符号重名。那是编译错误而不是合并冲突，改个名即可，比每次同步都要手工解 import 冲突划算。
 
 ---
 
