@@ -21,7 +21,19 @@ UPSTREAM_REF="refs/remotes/upstream/main"
 # Packages carrying this fork's code or its core hook points. decoyfallback is
 # here because it owns the origin validation and bounded transport that
 # proxy/artx now shares, so a regression there reaches both features.
-ARTX_PACKAGES=(./proxy/artx/... ./common/session/... ./proxy/freedom/... ./transport/internet/decoyfallback/...)
+#
+# websocket and splithttp are here for their rejection hooks, but also because
+# leaving them out is what let two data races in upstream's xhttp client sit
+# undetected: nothing in this gate ran them under -race. xhttp is the main
+# transport, so it gets covered.
+ARTX_PACKAGES=(
+  ./proxy/artx/...
+  ./common/session/...
+  ./proxy/freedom/...
+  ./transport/internet/decoyfallback/...
+  ./transport/internet/websocket/...
+  ./transport/internet/splithttp/...
+)
 
 # infra/conf holds the ArtX config loader, but its TestGeodataConfig needs
 # resources/geoip.dat, which is not in the tree. Run only the ArtX cases there.

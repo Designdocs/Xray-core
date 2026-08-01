@@ -189,36 +189,42 @@ func (c *DefaultDialerClient) Close() error {
 type WaitReadCloser struct {
 	Wait chan struct{}
 	io.ReadCloser
+
+	// settle publishes the body exactly once and orders that write against
+	// every Read and Close. The Wait channel cannot do it alone, because Close
+	// closes the channel too: a reader woken by Close would touch the field
+	// while Set is still writing it, and a torn read of a two word interface
+	// value is a crash rather than a stale answer.
+	settle sync.Once
 }
 
 func (w *WaitReadCloser) Set(rc io.ReadCloser) {
-	w.ReadCloser = rc
-	defer func() {
-		if recover() != nil {
-			rc.Close()
-		}
-	}()
-	close(w.Wait)
+	published := false
+	w.settle.Do(func() {
+		w.ReadCloser = rc
+		published = true
+		close(w.Wait)
+	})
+	if !published {
+		// Close already ran, so nothing will ever read this body.
+		rc.Close()
+	}
 }
 
 func (w *WaitReadCloser) Read(b []byte) (int, error) {
+	// Receiving is not an optimisation to skip once the body is known to be
+	// there: it is the only edge that makes Set's write visible here.
+	<-w.Wait
 	if w.ReadCloser == nil {
-		if <-w.Wait; w.ReadCloser == nil {
-			return 0, io.ErrClosedPipe
-		}
+		return 0, io.ErrClosedPipe
 	}
 	return w.ReadCloser.Read(b)
 }
 
 func (w *WaitReadCloser) Close() error {
+	w.settle.Do(func() { close(w.Wait) })
 	if w.ReadCloser != nil {
 		return w.ReadCloser.Close()
 	}
-	defer func() {
-		if recover() != nil && w.ReadCloser != nil {
-			w.ReadCloser.Close()
-		}
-	}()
-	close(w.Wait)
 	return nil
 }

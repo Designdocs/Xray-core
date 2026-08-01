@@ -595,11 +595,16 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 
 	var writed int
 	for _, buff := range buffer.MultiBuffer {
+		// WriteMultiBuffer hands the buffer to the pipe, and the poster
+		// goroutine can drain and release it before the next line runs, so its
+		// length has to be taken first. Reading it afterwards both races and
+		// undercounts, and an undercount reaches the caller as a short write.
+		length := int(buff.Len())
 		err := w.WriteMultiBuffer(buf.MultiBuffer{buff})
 		if err != nil {
 			return writed, err
 		}
-		writed += int(buff.Len())
+		writed += length
 	}
 	return writed, nil
 }
