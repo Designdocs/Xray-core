@@ -16,6 +16,15 @@ type RuntimeStats struct {
 	ReplayRejected        uint64
 	FallbackHits          uint64
 	FallbackErrors        uint64
+	NativeActive          uint64
+	NativeAccepted        uint64
+	NativeRejected        uint64
+	NativeDatagramsUp     uint64
+	NativeDatagramsDown   uint64
+	NativeBytesUp         uint64
+	NativeBytesDown       uint64
+	NativeTransportErrors uint64
+	NativeTargetErrors    uint64
 }
 
 type runtimeCounters struct {
@@ -26,6 +35,15 @@ type runtimeCounters struct {
 	replayRejected        atomic.Uint64
 	fallbackHits          atomic.Uint64
 	fallbackErrors        atomic.Uint64
+	nativeActive          atomic.Uint64
+	nativeAccepted        atomic.Uint64
+	nativeRejected        atomic.Uint64
+	nativeDatagramsUp     atomic.Uint64
+	nativeDatagramsDown   atomic.Uint64
+	nativeBytesUp         atomic.Uint64
+	nativeBytesDown       atomic.Uint64
+	nativeTransportErrors atomic.Uint64
+	nativeTargetErrors    atomic.Uint64
 	manager               featurestats.Manager
 	bindMu                sync.Mutex
 	managed               [runtimeCounterCount]featurestats.Counter
@@ -42,6 +60,15 @@ const (
 	runtimeCounterReplayRejected
 	runtimeCounterFallbackHits
 	runtimeCounterFallbackErrors
+	runtimeCounterNativeActive
+	runtimeCounterNativeAccepted
+	runtimeCounterNativeRejected
+	runtimeCounterNativeDatagramsUp
+	runtimeCounterNativeDatagramsDown
+	runtimeCounterNativeBytesUp
+	runtimeCounterNativeBytesDown
+	runtimeCounterNativeTransportErrors
+	runtimeCounterNativeTargetErrors
 	runtimeCounterCount
 )
 
@@ -53,6 +80,15 @@ var runtimeCounterNames = [...]string{
 	"replay_rejected",
 	"fallback_hits",
 	"fallback_errors",
+	"native_active_associations",
+	"native_accepted_associations",
+	"native_rejected_associations",
+	"native_datagrams_up",
+	"native_datagrams_down",
+	"native_bytes_up",
+	"native_bytes_down",
+	"native_transport_errors",
+	"native_target_errors",
 }
 
 func (counters *runtimeCounters) snapshot() RuntimeStats {
@@ -64,6 +100,15 @@ func (counters *runtimeCounters) snapshot() RuntimeStats {
 		ReplayRejected:        counters.replayRejected.Load(),
 		FallbackHits:          counters.fallbackHits.Load(),
 		FallbackErrors:        counters.fallbackErrors.Load(),
+		NativeActive:          counters.nativeActive.Load(),
+		NativeAccepted:        counters.nativeAccepted.Load(),
+		NativeRejected:        counters.nativeRejected.Load(),
+		NativeDatagramsUp:     counters.nativeDatagramsUp.Load(),
+		NativeDatagramsDown:   counters.nativeDatagramsDown.Load(),
+		NativeBytesUp:         counters.nativeBytesUp.Load(),
+		NativeBytesDown:       counters.nativeBytesDown.Load(),
+		NativeTransportErrors: counters.nativeTransportErrors.Load(),
+		NativeTargetErrors:    counters.nativeTargetErrors.Load(),
 	}
 }
 
@@ -100,6 +145,24 @@ func (counters *runtimeCounters) add(metric runtimeCounter, delta int64) {
 		addAtomicUint64(&counters.fallbackHits, delta)
 	case runtimeCounterFallbackErrors:
 		addAtomicUint64(&counters.fallbackErrors, delta)
+	case runtimeCounterNativeActive:
+		addAtomicUint64(&counters.nativeActive, delta)
+	case runtimeCounterNativeAccepted:
+		addAtomicUint64(&counters.nativeAccepted, delta)
+	case runtimeCounterNativeRejected:
+		addAtomicUint64(&counters.nativeRejected, delta)
+	case runtimeCounterNativeDatagramsUp:
+		addAtomicUint64(&counters.nativeDatagramsUp, delta)
+	case runtimeCounterNativeDatagramsDown:
+		addAtomicUint64(&counters.nativeDatagramsDown, delta)
+	case runtimeCounterNativeBytesUp:
+		addAtomicUint64(&counters.nativeBytesUp, delta)
+	case runtimeCounterNativeBytesDown:
+		addAtomicUint64(&counters.nativeBytesDown, delta)
+	case runtimeCounterNativeTransportErrors:
+		addAtomicUint64(&counters.nativeTransportErrors, delta)
+	case runtimeCounterNativeTargetErrors:
+		addAtomicUint64(&counters.nativeTargetErrors, delta)
 	}
 
 	if counters.managedBound.Load() {
@@ -148,5 +211,14 @@ func RuntimeStatsFromManager(manager featurestats.Manager, inboundTag string) Ru
 		ReplayRejected:        value(runtimeCounterReplayRejected),
 		FallbackHits:          value(runtimeCounterFallbackHits),
 		FallbackErrors:        value(runtimeCounterFallbackErrors),
+		NativeActive:          value(runtimeCounterNativeActive),
+		NativeAccepted:        value(runtimeCounterNativeAccepted),
+		NativeRejected:        value(runtimeCounterNativeRejected),
+		NativeDatagramsUp:     value(runtimeCounterNativeDatagramsUp),
+		NativeDatagramsDown:   value(runtimeCounterNativeDatagramsDown),
+		NativeBytesUp:         value(runtimeCounterNativeBytesUp),
+		NativeBytesDown:       value(runtimeCounterNativeBytesDown),
+		NativeTransportErrors: value(runtimeCounterNativeTransportErrors),
+		NativeTargetErrors:    value(runtimeCounterNativeTargetErrors),
 	}
 }

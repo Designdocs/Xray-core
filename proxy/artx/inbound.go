@@ -39,17 +39,18 @@ type Server struct {
 	users    map[[UserLocatorLength]byte]*protocol.MemoryUser
 	locators map[string][UserLocatorLength]byte
 
-	tlsConfig       *tls.Config
-	replay          *replayCache
-	fallback        FallbackHandler
-	stats           runtimeCounters
-	wireVersion     uint32
-	profileVersion  uint32
-	udpEnabled      bool
-	wireV3DummyPSK  [wireV3TagLength]byte
-	wireV4DummyPSK  [wireV4TagLength]byte
-	now             func() time.Time
-	targetReadyWait time.Duration
+	tlsConfig         *tls.Config
+	replay            *replayCache
+	fallback          FallbackHandler
+	stats             runtimeCounters
+	wireVersion       uint32
+	profileVersion    uint32
+	udpEnabled        bool
+	wireV3DummyPSK    [wireV3TagLength]byte
+	wireV4DummyPSK    [wireV4TagLength]byte
+	nativeUDPDummyPSK [nativeUDPTagLength]byte
+	now               func() time.Time
+	targetReadyWait   time.Duration
 }
 
 func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
@@ -95,6 +96,9 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		udpEnabled:      config.UdpEnabled,
 		now:             time.Now,
 		targetReadyWait: wireV4TargetReadyWait,
+	}
+	if _, err := rand.Read(server.nativeUDPDummyPSK[:]); err != nil {
+		return nil, fmt.Errorf("artx: initialize native UDP dummy key: %w", err)
 	}
 	if config.WireVersion == 3 {
 		if _, err := rand.Read(server.wireV3DummyPSK[:]); err != nil {

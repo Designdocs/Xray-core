@@ -52,14 +52,15 @@ func TestArtXServerRequiresTLS13(t *testing.T) {
 
 func TestArtXServerValidatesProfileVersions(t *testing.T) {
 	certificatePEM, keyPEM := testCertificate(t)
-	baseConfig := ServerConfig{
-		Users:       []*protocol.User{protocol.ToProtoUser(artxMemoryUser("user@example.com", "test-psk"))},
-		TlsSettings: &transporttls.Config{Certificate: []*transporttls.Certificate{{Certificate: certificatePEM, Key: keyPEM}}},
-		WireVersion: 1,
+	newConfig := func(profileVersion uint32) *ServerConfig {
+		return &ServerConfig{
+			Users:          []*protocol.User{protocol.ToProtoUser(artxMemoryUser("user@example.com", "test-psk"))},
+			TlsSettings:    &transporttls.Config{Certificate: []*transporttls.Certificate{{Certificate: certificatePEM, Key: keyPEM}}},
+			WireVersion:    1,
+			ProfileVersion: profileVersion,
+		}
 	}
-	profileV3 := baseConfig
-	profileV3.ProfileVersion = 3
-	server, err := NewServer(context.Background(), &profileV3)
+	server, err := NewServer(context.Background(), newConfig(3))
 	if preciseSettingsDeadlineSupported {
 		if err != nil {
 			t.Fatalf("profile v3: %v", err)
@@ -71,9 +72,7 @@ func TestArtXServerValidatesProfileVersions(t *testing.T) {
 		t.Fatalf("profile v3 error = %v, want %v", err, errPreciseSettingsDeadlineUnsupported)
 	}
 
-	profileV4 := baseConfig
-	profileV4.ProfileVersion = 4
-	if _, err := NewServer(context.Background(), &profileV4); err == nil {
+	if _, err := NewServer(context.Background(), newConfig(4)); err == nil {
 		t.Fatal("profile v4 was accepted")
 	}
 }
