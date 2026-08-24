@@ -16,6 +16,7 @@ type RuntimeStats struct {
 	ReplayRejected        uint64
 	FallbackHits          uint64
 	FallbackErrors        uint64
+	FlowControlNegotiated uint64
 	NativeActive          uint64
 	NativeAccepted        uint64
 	NativeRejected        uint64
@@ -35,6 +36,7 @@ type runtimeCounters struct {
 	replayRejected        atomic.Uint64
 	fallbackHits          atomic.Uint64
 	fallbackErrors        atomic.Uint64
+	flowControlNegotiated atomic.Uint64
 	nativeActive          atomic.Uint64
 	nativeAccepted        atomic.Uint64
 	nativeRejected        atomic.Uint64
@@ -60,6 +62,7 @@ const (
 	runtimeCounterReplayRejected
 	runtimeCounterFallbackHits
 	runtimeCounterFallbackErrors
+	runtimeCounterFlowControlNegotiated
 	runtimeCounterNativeActive
 	runtimeCounterNativeAccepted
 	runtimeCounterNativeRejected
@@ -80,6 +83,7 @@ var runtimeCounterNames = [...]string{
 	"replay_rejected",
 	"fallback_hits",
 	"fallback_errors",
+	"flow_control_negotiated",
 	"native_active_associations",
 	"native_accepted_associations",
 	"native_rejected_associations",
@@ -100,6 +104,7 @@ func (counters *runtimeCounters) snapshot() RuntimeStats {
 		ReplayRejected:        counters.replayRejected.Load(),
 		FallbackHits:          counters.fallbackHits.Load(),
 		FallbackErrors:        counters.fallbackErrors.Load(),
+		FlowControlNegotiated: counters.flowControlNegotiated.Load(),
 		NativeActive:          counters.nativeActive.Load(),
 		NativeAccepted:        counters.nativeAccepted.Load(),
 		NativeRejected:        counters.nativeRejected.Load(),
@@ -145,6 +150,8 @@ func (counters *runtimeCounters) add(metric runtimeCounter, delta int64) {
 		addAtomicUint64(&counters.fallbackHits, delta)
 	case runtimeCounterFallbackErrors:
 		addAtomicUint64(&counters.fallbackErrors, delta)
+	case runtimeCounterFlowControlNegotiated:
+		addAtomicUint64(&counters.flowControlNegotiated, delta)
 	case runtimeCounterNativeActive:
 		addAtomicUint64(&counters.nativeActive, delta)
 	case runtimeCounterNativeAccepted:
@@ -211,6 +218,7 @@ func RuntimeStatsFromManager(manager featurestats.Manager, inboundTag string) Ru
 		ReplayRejected:        value(runtimeCounterReplayRejected),
 		FallbackHits:          value(runtimeCounterFallbackHits),
 		FallbackErrors:        value(runtimeCounterFallbackErrors),
+		FlowControlNegotiated: value(runtimeCounterFlowControlNegotiated),
 		NativeActive:          value(runtimeCounterNativeActive),
 		NativeAccepted:        value(runtimeCounterNativeAccepted),
 		NativeRejected:        value(runtimeCounterNativeRejected),

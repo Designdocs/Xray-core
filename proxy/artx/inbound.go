@@ -46,6 +46,7 @@ type Server struct {
 	wireVersion       uint32
 	profileVersion    uint32
 	udpEnabled        bool
+	maxWindowScale    uint32
 	wireV3DummyPSK    [wireV3TagLength]byte
 	wireV4DummyPSK    [wireV4TagLength]byte
 	nativeUDPDummyPSK [nativeUDPTagLength]byte
@@ -94,6 +95,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		wireVersion:     config.WireVersion,
 		profileVersion:  config.ProfileVersion,
 		udpEnabled:      config.UdpEnabled,
+		maxWindowScale:  min(config.MaxWindowScale, MaxWindowScale),
 		now:             time.Now,
 		targetReadyWait: wireV4TargetReadyWait,
 	}
@@ -259,6 +261,14 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	}
 	switch openFrame.Type {
 	case FrameTCPSyn:
+		effectiveScale := negotiateWindowScale(settings, s.maxWindowScale, s.wireVersion)
+		limits := flowControlLimitsForScale(effectiveScale)
+		if err := writeExpandedReceiveCredit(writer, limits, true); err != nil {
+			return fmt.Errorf("artx: expand receive window: %w", err)
+		}
+		if effectiveScale != 0 {
+			s.stats.add(runtimeCounterFlowControlNegotiated, 1)
+		}
 		destination, err := DecodeTCPDestination(openFrame.Payload)
 		if err != nil {
 			return err
@@ -268,7 +278,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 			return fmt.Errorf("artx: dispatch: %w", err)
 		}
 		emitR0ServerEvent(r0Hook, r0ServerEventDispatchReturn, 1)
-		return relaySingleStream(ctx, tlsConnection, writer, observeR0ServerLink(link, r0Hook))
+		return relaySingleStreamWithLimits(ctx, tlsConnection, writer, observeR0ServerLink(link, r0Hook), limits)
 	case FrameUDPAssoc:
 		if !s.udpEnabled {
 			return errors.New("artx: UDP is disabled")
@@ -449,11 +459,21 @@ type sendWindow struct {
 	mu         sync.Mutex
 	stream     uint32
 	connection uint32
+	maxStream  uint32
+	maxConn    uint32
 	changed    chan struct{}
 }
 
 func newSendWindow() *sendWindow {
-	return &sendWindow{stream: InitialStreamWindow, connection: InitialConnectionWindow, changed: make(chan struct{})}
+	return newSendWindowWithLimits(legacyFlowControlLimits())
+}
+
+func newSendWindowWithLimits(limits flowControlLimits) *sendWindow {
+	return &sendWindow{
+		stream: limits.stream, connection: limits.connection,
+		maxStream: limits.stream, maxConn: limits.connection,
+		changed: make(chan struct{}),
+	}
 }
 
 func (window *sendWindow) consume(amount int) error {
@@ -494,12 +514,12 @@ func (window *sendWindow) update(streamID, increment uint32) error {
 	defer window.mu.Unlock()
 	switch streamID {
 	case 0:
-		if increment > InitialConnectionWindow-window.connection {
+		if increment > window.maxConn-window.connection {
 			return errors.New("artx: connection window overflow")
 		}
 		window.connection += increment
 	case ClientStreamID:
-		if increment > InitialStreamWindow-window.stream {
+		if increment > window.maxStream-window.stream {
 			return errors.New("artx: stream window overflow")
 		}
 		window.stream += increment
@@ -526,14 +546,22 @@ type relayResult struct {
 }
 
 func relaySingleStream(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link) error {
-	return relaySingleStreamFrames(ctx, connection, writer, link, func() (Frame, error) {
+	return relaySingleStreamWithLimits(ctx, connection, writer, link, legacyFlowControlLimits())
+}
+
+func relaySingleStreamWithLimits(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, limits flowControlLimits) error {
+	return relaySingleStreamFramesWithLimits(ctx, connection, writer, link, func() (Frame, error) {
 		return ReadFrame(connection)
-	})
+	}, limits)
 }
 
 func relaySingleStreamFrames(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, readFrame func() (Frame, error)) error {
-	sendWindow := newSendWindow()
-	receiveWindow := newSendWindow()
+	return relaySingleStreamFramesWithLimits(ctx, connection, writer, link, readFrame, legacyFlowControlLimits())
+}
+
+func relaySingleStreamFramesWithLimits(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, readFrame func() (Frame, error), limits flowControlLimits) error {
+	sendWindow := newSendWindowWithLimits(limits)
+	receiveWindow := newSendWindowWithLimits(limits)
 	clientFinished := make(chan struct{}, 1)
 	results := make(chan relayResult, 2)
 	go func() {
@@ -639,7 +667,7 @@ func relayUplink(connection io.ReadWriteCloser, writer *lockedFrameWriter, link 
 }
 
 func relayUplinkFrames(connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, sendWindow, receiveWindow *sendWindow, clientFinished chan<- struct{}, readFrame func() (Frame, error)) error {
-	queue := newUplinkQueue()
+	queue := newUplinkQueue(receiveWindow.maxStream)
 	pumpDone := make(chan error, 1)
 	go func() {
 		err := pumpUplink(writer, link, receiveWindow, queue, clientFinished)
@@ -732,14 +760,15 @@ func readUplinkFrameSource(readFrame func() (Frame, error), queue *uplinkQueue, 
 type uplinkQueue struct {
 	mu      sync.Mutex
 	data    bytes.Buffer
+	limit   uint32
 	fin     bool
 	stopped bool
 	err     error
 	changed chan struct{}
 }
 
-func newUplinkQueue() *uplinkQueue {
-	return &uplinkQueue{changed: make(chan struct{})}
+func newUplinkQueue(limit uint32) *uplinkQueue {
+	return &uplinkQueue{limit: limit, changed: make(chan struct{})}
 }
 
 func (queue *uplinkQueue) enqueue(payload []byte) error {
@@ -748,7 +777,7 @@ func (queue *uplinkQueue) enqueue(payload []byte) error {
 	if queue.fin {
 		return errors.New("artx: DATA after FIN")
 	}
-	if len(payload) > int(InitialStreamWindow)-queue.data.Len() {
+	if len(payload) > int(queue.limit)-queue.data.Len() {
 		return errors.New("artx: uplink receive buffer overflow")
 	}
 	_, _ = queue.data.Write(payload)

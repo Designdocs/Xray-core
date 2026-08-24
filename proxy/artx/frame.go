@@ -41,6 +41,7 @@ const (
 	SettingPaddingProfileVersionAck = uint16(0x0005)
 	SettingResumptionTicketOffered  = uint16(0x0006)
 	SettingSessionReuse             = uint16(0x0007)
+	SettingMaxWindowScale           = uint16(0x0008)
 	settingEncodedLength            = 6
 	addressTypeIPv4                 = byte(0x01)
 	addressTypeDomain               = byte(0x03)

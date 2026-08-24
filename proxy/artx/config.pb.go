@@ -127,6 +127,7 @@ type ServerConfig struct {
 	ProfileVersion uint32                 `protobuf:"varint,4,opt,name=profile_version,json=profileVersion,proto3" json:"profile_version,omitempty"`
 	Fallback       *FallbackConfig        `protobuf:"bytes,5,opt,name=fallback,proto3" json:"fallback,omitempty"`
 	UdpEnabled     bool                   `protobuf:"varint,6,opt,name=udp_enabled,json=udpEnabled,proto3" json:"udp_enabled,omitempty"`
+	MaxWindowScale uint32                 `protobuf:"varint,7,opt,name=max_window_scale,json=maxWindowScale,proto3" json:"max_window_scale,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -203,6 +204,13 @@ func (x *ServerConfig) GetUdpEnabled() bool {
 	return false
 }
 
+func (x *ServerConfig) GetMaxWindowScale() uint32 {
+	if x != nil {
+		return x.MaxWindowScale
+	}
+	return 0
+}
+
 var File_proxy_artx_config_proto protoreflect.FileDescriptor
 
 const file_proxy_artx_config_proto_rawDesc = "" +
@@ -212,7 +220,7 @@ const file_proxy_artx_config_proto_rawDesc = "" +
 	"\x03psk\x18\x01 \x01(\tR\x03psk\"B\n" +
 	"\x0eFallbackConfig\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x16\n" +
-	"\x06origin\x18\x02 \x01(\tR\x06origin\"\xb2\x02\n" +
+	"\x06origin\x18\x02 \x01(\tR\x06origin\"\xdc\x02\n" +
 	"\fServerConfig\x120\n" +
 	"\x05users\x18\x01 \x03(\v2\x1a.xray.common.protocol.UserR\x05users\x12F\n" +
 	"\ftls_settings\x18\x02 \x01(\v2#.xray.transport.internet.tls.ConfigR\vtlsSettings\x12!\n" +
@@ -220,7 +228,8 @@ const file_proxy_artx_config_proto_rawDesc = "" +
 	"\x0fprofile_version\x18\x04 \x01(\rR\x0eprofileVersion\x12;\n" +
 	"\bfallback\x18\x05 \x01(\v2\x1f.xray.proxy.artx.FallbackConfigR\bfallback\x12\x1f\n" +
 	"\vudp_enabled\x18\x06 \x01(\bR\n" +
-	"udpEnabledBO\n" +
+	"udpEnabled\x12(\n" +
+	"\x10max_window_scale\x18\a \x01(\rR\x0emaxWindowScaleBO\n" +
 	"\x13com.xray.proxy.artxP\x01Z$github.com/xtls/xray-core/proxy/artx\xaa\x02\x0fXray.Proxy.ArtXb\x06proto3"
 
 var (

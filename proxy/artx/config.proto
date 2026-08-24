@@ -25,4 +25,5 @@ message ServerConfig {
   uint32 profile_version = 4;
   FallbackConfig fallback = 5;
   bool udp_enabled = 6;
+  uint32 max_window_scale = 7;
 }

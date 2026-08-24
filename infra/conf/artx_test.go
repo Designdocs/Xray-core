@@ -14,6 +14,7 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 		WireVersion:    1,
 		ProfileVersion: 2,
 		UDPEnabled:     true,
+		MaxWindowScale: 3,
 	}
 	built, err := config.Build()
 	if err != nil {
@@ -23,7 +24,7 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 	if !ok {
 		t.Fatalf("Build() = %T", built)
 	}
-	if server.WireVersion != 1 || server.ProfileVersion != 2 || !server.UdpEnabled || server.TlsSettings == nil || len(server.Users) != 1 {
+	if server.WireVersion != 1 || server.ProfileVersion != 2 || !server.UdpEnabled || server.MaxWindowScale != 3 || server.TlsSettings == nil || len(server.Users) != 1 {
 		t.Fatalf("server config = %#v", server)
 	}
 	user, err := server.Users[0].ToMemoryUser()
@@ -33,6 +34,19 @@ func TestArtXInboundConfigBuild(t *testing.T) {
 	account, ok := user.Account.(*artx.MemoryAccount)
 	if !ok || account.PSK != "secret" || user.Email != "user@example.com" || user.Level != 2 {
 		t.Fatalf("user = %#v", user)
+	}
+}
+
+func TestArtXInboundConfigRejectsInvalidMaxWindowScale(t *testing.T) {
+	config := &ArtXServerConfig{
+		Users:          []*ArtXUser{{PSK: "secret"}},
+		TLSSettings:    &TLSConfig{},
+		WireVersion:    1,
+		ProfileVersion: 1,
+		MaxWindowScale: 5,
+	}
+	if _, err := config.Build(); err == nil {
+		t.Fatal("maxWindowScale above 4 was accepted")
 	}
 }
 
@@ -148,11 +162,15 @@ func TestArtXInboundConfigRejectsInvalidBoundaryValues(t *testing.T) {
 }
 
 func TestArtXInboundLoaderIsRegistered(t *testing.T) {
-	raw, err := inboundConfigLoader.LoadWithID([]byte(`{"users":[{"psk":"secret"}],"tlsSettings":{},"wireVersion":1,"profileVersion":1}`), "artx")
+	raw, err := inboundConfigLoader.LoadWithID([]byte(`{"users":[{"psk":"secret"}],"tlsSettings":{},"wireVersion":1,"profileVersion":1,"maxWindowScale":2}`), "artx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := raw.(*ArtXServerConfig); !ok {
+	config, ok := raw.(*ArtXServerConfig)
+	if !ok {
 		t.Fatalf("loader returned %T", raw)
+	}
+	if config.MaxWindowScale != 2 {
+		t.Fatalf("maxWindowScale = %d, want 2", config.MaxWindowScale)
 	}
 }

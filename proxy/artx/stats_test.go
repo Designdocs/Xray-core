@@ -21,6 +21,7 @@ func TestRuntimeStatsMirrorUsesInboundTag(t *testing.T) {
 	counters.add(runtimeCounterReplayRejected, 1)
 	counters.add(runtimeCounterFallbackHits, 2)
 	counters.add(runtimeCounterFallbackErrors, 1)
+	counters.add(runtimeCounterFlowControlNegotiated, 3)
 	counters.add(runtimeCounterNativeActive, 1)
 	counters.add(runtimeCounterNativeAccepted, 2)
 	counters.add(runtimeCounterNativeRejected, 3)
@@ -40,6 +41,7 @@ func TestRuntimeStatsMirrorUsesInboundTag(t *testing.T) {
 		ReplayRejected:        1,
 		FallbackHits:          2,
 		FallbackErrors:        1,
+		FlowControlNegotiated: 3,
 		NativeActive:          1,
 		NativeAccepted:        2,
 		NativeRejected:        3,

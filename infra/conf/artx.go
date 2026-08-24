@@ -24,6 +24,7 @@ type ArtXServerConfig struct {
 	ProfileVersion uint32              `json:"profileVersion"`
 	Fallback       *ArtXFallbackConfig `json:"fallback"`
 	UDPEnabled     bool                `json:"udpEnabled"`
+	MaxWindowScale uint32              `json:"maxWindowScale"`
 }
 
 type ArtXFallbackConfig struct {
@@ -41,6 +42,9 @@ func (config *ArtXServerConfig) Build() (proto.Message, error) {
 	if config.ProfileVersion < 1 || config.ProfileVersion > 3 {
 		return nil, errors.New("ARTX: profileVersion must be 1, 2, or 3")
 	}
+	if config.MaxWindowScale > artx.MaxWindowScale {
+		return nil, errors.New("ARTX: maxWindowScale must be between 0 and 4")
+	}
 	if (config.WireVersion == 3 || config.WireVersion == 4) && (config.ProfileVersion != 1 || config.UDPEnabled || config.Fallback == nil || !config.Fallback.Enabled) {
 		return nil, errors.New("ARTX: wireVersion 3 or 4 requires profileVersion 1, udpEnabled false, and enabled fallback")
 	}
@@ -53,6 +57,7 @@ func (config *ArtXServerConfig) Build() (proto.Message, error) {
 		WireVersion:    config.WireVersion,
 		ProfileVersion: config.ProfileVersion,
 		UdpEnabled:     config.UDPEnabled,
+		MaxWindowScale: config.MaxWindowScale,
 		Users:          make([]*protocol.User, 0, len(config.Users)),
 	}
 	if config.Fallback != nil {
