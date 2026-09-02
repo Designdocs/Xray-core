@@ -292,3 +292,4 @@ jobs:
           name: Xray-${{ env.ASSET_NAME }}
           path: |
             ./build_assets/*
+          retention-days: 1
