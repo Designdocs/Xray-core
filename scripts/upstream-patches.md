@@ -61,6 +61,29 @@ theirs and delete this entry.
 
 ---
 
+### infra/conf: unreachable code after the legacy reverse error
+
+| | |
+|---|---|
+| Ours | `fix(upstream): drop unreachable code after the legacy reverse error` (find it with `git log --grep`) |
+| Files | `infra/conf/xray.go` |
+| Tests | none — `go vet ./infra/conf/` is the check |
+| Reported upstream | **No.** Deliberate — we are not opening a PR. |
+
+Upstream turned `"legacy reverse"` into a `PrintRemovedFeatureError` by adding a
+`return` in front of the old body and leaving the body in place, so
+`go vet ./infra/conf/` reports `xray.go:614:3: unreachable code`. We deleted the
+five dead lines.
+
+**This one is a five line deletion in the file that conflicts most.**
+`infra/conf/xray.go` also carries the ArtX registration, and the README's rule
+applies: insertions merge forever, deletions are the bill. It buys nothing but a
+clean `go vet`, so if upstream ever edits that region, **drop ours and take
+theirs** rather than resolving the conflict. Upstream will almost certainly
+delete the block itself once the removal has been out for a release or two.
+
+---
+
 ### splithttp: WaitReadCloser publishes the body outside the Wait channel
 
 | | |
