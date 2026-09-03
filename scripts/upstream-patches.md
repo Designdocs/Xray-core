@@ -26,51 +26,63 @@ remembers the reason for. This file is the ledger that stops that.
 
 ## Open
 
-### splithttp: two data races on the xhttp client path
+### splithttp: WaitReadCloser publishes the body outside the Wait channel
 
 | | |
 |---|---|
 | Ours | `044830c5` `fix(splithttp): repair two data races on the xhttp client path` |
-| Files | `transport/internet/splithttp/client.go`, `transport/internet/splithttp/dialer.go` |
-| Tests | `waitreadcloser_test.go`, `uploadwriter_test.go` (new files, keep either way) |
+| Files | `transport/internet/splithttp/client.go` |
+| Tests | `waitreadcloser_test.go` (new file, keep either way) |
 | Reported upstream | **No.** Deliberate — we are not opening a PR. |
 
-Two independent defects, both reproducible on a clean upstream checkout with
-`go test -race -run Test_maxUpload ./transport/internet/splithttp/`.
+Reproducible on a clean upstream checkout with `go test -race -run Test_maxUpload
+./transport/internet/splithttp/`.
 
-1. `WaitReadCloser.Read` checked the embedded `io.ReadCloser` before receiving
-   on `Wait`, which skipped the only happens-before edge that made `Set`'s
-   write visible. An interface value is two words, so a torn read there is a
-   crash. Introduced by `f7bd98b13` (RPRX, 2024-11-27). The same rewrite also
-   fixed a leak that is independent of scheduling: a body arriving after
-   `Close` was closed *and* published, so a reader could read a closed body.
-2. `uploadWriter.Write` read `buff.Len()` after `WriteMultiBuffer` had handed
-   the buffer to the pipe, where the poster goroutine can drain and release it.
-   Besides the race this undercounts and returns a short write. Introduced by
-   `6fc0a40c2` (风扇滑翔翼, 2025-08-16).
+`WaitReadCloser.Read` checked the embedded `io.ReadCloser` before receiving on
+`Wait`, which skipped the only happens-before edge that made `Set`'s write
+visible. An interface value is two words, so a torn read there is a crash.
+Introduced by `f7bd98b13` (RPRX, 2024-11-27). The same rewrite also fixed a leak
+that is independent of scheduling: a body arriving after `Close` was closed *and*
+published, so a reader could read a closed body.
 
-**Why this one will conflict:** `client.go` and `dialer.go` are on the xhttp
-path, which is both upstream's most active transport and the one our nodes lead
-with. Expect to resolve this at most syncs. `rerere` is enabled, so the second
-and later resolutions of the same shape replay automatically.
+**Why this one will conflict:** `client.go` is on the xhttp path, which is both
+upstream's most active transport and the one our nodes lead with. Expect to
+resolve this at most syncs. `rerere` is enabled, so the second and later
+resolutions of the same shape replay automatically.
 
 **Check at each sync:**
 
 ```bash
 git log --oneline HEAD..upstream/main -- \
-  transport/internet/splithttp/client.go \
-  transport/internet/splithttp/dialer.go
+  transport/internet/splithttp/client.go
 ```
 
-Nothing listed means upstream has not touched either file and the patch stands
-as is. If something is listed, read it before merging: upstream may have fixed
-the same defect differently, in which case take theirs and delete this entry.
-Our tests are the arbiter — they must still pass against upstream's version.
+Nothing listed means upstream has not touched the file and the patch stands as
+is. If something is listed, read it before merging: upstream may have fixed the
+same defect differently, in which case take theirs and delete this entry. Our
+tests are the arbiter — they must still pass against upstream's version.
 
 ---
 
 ## Retired
 
-Nothing yet. When an entry retires, move it here with the upstream commit that
-replaced it, so the next person can tell "upstream fixed this" from "we gave
-up".
+### splithttp: uploadWriter counted a buffer it had already released
+
+| | |
+|---|---|
+| Ours | `044830c5` (the `dialer.go` half) |
+| Replaced by | `77f98eba` `XHTTP client: Fix a race condition and a data race (#6665)`, merged 2026-09-03 |
+| Tests | `uploadwriter_test.go` — **kept**, and passes against upstream's version |
+
+`uploadWriter.Write` read `buff.Len()` after `WriteMultiBuffer` had handed the
+buffer to the pipe, where the poster goroutine can drain and release it. Besides
+the race this undercounts and returns a short write. Introduced by `6fc0a40c2`
+(风扇滑翔翼, 2025-08-16).
+
+Upstream landed the identical fix — take the length before the write — with the
+local named `n` instead of `length`. Ours was dropped at the 2026-09-03 sync in
+favour of upstream's, per the rule above: keep upstream's version even when ours
+reads better. `dialer.go` is now byte-identical to upstream again.
+
+Upstream's commit also converts `DefaultDialerClient.closed` to an
+`atomic.Bool`, a third defect we had not found. It merged without conflict.
