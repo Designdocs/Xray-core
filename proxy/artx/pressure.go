@@ -93,6 +93,9 @@ type PressureGovernor struct {
 	// commit the whole budget between two samples.
 	memoryTotal     uint64
 	memoryAvailable uint64
+	// budget is the operator-tunable window budget policy. Always normalized,
+	// so it is safe to use without re-checking.
+	budget WindowBudgetPolicy
 }
 
 // NewPressureGovernor returns a governor that starts wide open at
@@ -106,7 +109,12 @@ func NewPressureGovernor(config PressureGovernorConfig) *PressureGovernor {
 	if recover <= 0 {
 		recover = DefaultPressureRecoverWindow
 	}
-	return &PressureGovernor{sustainWindow: sustain, recoverWindow: recover, ceiling: MaxWindowScale}
+	return &PressureGovernor{
+		sustainWindow: sustain,
+		recoverWindow: recover,
+		ceiling:       MaxWindowScale,
+		budget:        DefaultWindowBudgetPolicy(),
+	}
 }
 
 // Ceiling is the current window scale ceiling. A nil governor is treated as
@@ -273,14 +281,33 @@ func SharedPressureGovernor() *PressureGovernor {
 // ObserveHostPressure feeds one sample to the process-wide governor, creating
 // it on first use so callers do not have to install one explicitly.
 func ObserveHostPressure(sample PressureSample) {
+	governor := sharedPressureGovernorForWrite()
+	governor.Observe(sample, time.Now())
+	// Fan the (possibly new) ceiling out to every bound inbound so the reported
+	// gauge follows host pressure even on inbounds that are accepting nothing.
+	publishPressureCeilings()
+}
+
+// SetSharedWindowBudgetPolicy configures the window budget on the process-wide
+// governor, creating it on first use exactly as ObserveHostPressure does, so
+// the policy can be installed before the first sample arrives.
+//
+// The budget is a host-level resource shared by every ArtX inbound in the
+// process, so this is deliberately process-wide: the last caller wins.
+func SetSharedWindowBudgetPolicy(policy WindowBudgetPolicy) {
+	sharedPressureGovernorForWrite().SetWindowBudgetPolicy(policy)
+	// The effective ceiling moves with the budget, so republish it.
+	publishPressureCeilings()
+}
+
+// sharedPressureGovernorForWrite returns the process-wide governor, creating it
+// if this is the first writer.
+func sharedPressureGovernorForWrite() *PressureGovernor {
 	sharedPressure.mu.Lock()
 	if sharedPressure.governor == nil {
 		sharedPressure.governor = NewPressureGovernor(PressureGovernorConfig{})
 	}
 	governor := sharedPressure.governor
 	sharedPressure.mu.Unlock()
-	governor.Observe(sample, time.Now())
-	// Fan the (possibly new) ceiling out to every bound inbound so the reported
-	// gauge follows host pressure even on inbounds that are accepting nothing.
-	publishPressureCeilings()
+	return governor
 }

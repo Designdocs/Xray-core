@@ -1,6 +1,11 @@
 package artx
 
-import "math/bits"
+import (
+	"errors"
+	"fmt"
+	"math/bits"
+	"strings"
+)
 
 // The window budget is the instantaneous half of ArtX flow-control damping.
 // PressureGovernor's ladder reacts to *sustained* CPU/memory load, so it can
@@ -15,29 +20,96 @@ import "math/bits"
 // refuses or terminates a connection — it bottoms out at scale 0, the legacy
 // window, and the connection is accepted as usual.
 const (
-	// WindowBudgetSharePercent is the share of total host memory ArtX is
-	// allowed to commit to receive windows.
-	WindowBudgetSharePercent = uint64(25)
+	// DefaultWindowBudgetSharePercent is the share of total host memory ArtX
+	// is allowed to commit to receive windows when the deployment does not
+	// override it.
+	DefaultWindowBudgetSharePercent = uint64(25)
 
-	// WindowBudgetReservePercent is the share of total host memory that must
-	// stay available to everything else. The budget is trimmed so ArtX's
+	// DefaultWindowBudgetReservePercent is the share of total host memory that
+	// must stay available to everything else. The budget is trimmed so ArtX's
 	// windows cannot drive available memory below it.
-	WindowBudgetReservePercent = uint64(20)
+	DefaultWindowBudgetReservePercent = uint64(20)
+
+	// maxWindowBudgetSharePercent and maxWindowBudgetReservePercent bound what
+	// an operator may configure. A share of 100% is allowed — the reserve
+	// still holds it back from actually starving the host — but a reserve of
+	// 100% would pin the budget at zero forever, which is what disabling the
+	// ArtX flow-control policy is for, not what a percentage is for.
+	maxWindowBudgetSharePercent   = uint64(100)
+	maxWindowBudgetReservePercent = uint64(99)
 )
 
+// WindowBudgetPolicy is the operator-tunable half of the budget: which slice
+// of host memory ArtX may commit to receive windows, and how much of the host
+// must stay available regardless.
+//
+// A zero field means "use the default for that field", so the zero value of
+// the whole struct is the default policy. That makes 0 unavailable as a way to
+// spell "no reserve at all"; the settable reserve range is therefore 1..99.
+type WindowBudgetPolicy struct {
+	// SharePercent is the share of total memory ArtX may commit, 1..100.
+	SharePercent uint64
+	// ReservePercent is the share of total memory that must stay available to
+	// everything else, 1..99.
+	ReservePercent uint64
+}
+
+// DefaultWindowBudgetPolicy is the policy applied when nothing is configured.
+func DefaultWindowBudgetPolicy() WindowBudgetPolicy {
+	return WindowBudgetPolicy{
+		SharePercent:   DefaultWindowBudgetSharePercent,
+		ReservePercent: DefaultWindowBudgetReservePercent,
+	}
+}
+
+// Validate reports the fields that are out of range. A zero field is not an
+// error — it selects the default — so the only way to fail is to configure a
+// percentage that cannot mean anything. Callers use this to log a rejected
+// value; normalized() applies the fallback either way, so a caller that skips
+// the check still gets a usable policy.
+func (policy WindowBudgetPolicy) Validate() error {
+	var rejected []string
+	if policy.SharePercent > maxWindowBudgetSharePercent {
+		rejected = append(rejected, fmt.Sprintf("share percent %d is above %d",
+			policy.SharePercent, maxWindowBudgetSharePercent))
+	}
+	if policy.ReservePercent > maxWindowBudgetReservePercent {
+		rejected = append(rejected, fmt.Sprintf("reserve percent %d is above %d",
+			policy.ReservePercent, maxWindowBudgetReservePercent))
+	}
+	if len(rejected) == 0 {
+		return nil
+	}
+	return errors.New("artx window budget: " + strings.Join(rejected, "; "))
+}
+
+// normalized substitutes the default for every field that is zero or out of
+// range, so the result is always usable.
+func (policy WindowBudgetPolicy) normalized() WindowBudgetPolicy {
+	effective := DefaultWindowBudgetPolicy()
+	if policy.SharePercent > 0 && policy.SharePercent <= maxWindowBudgetSharePercent {
+		effective.SharePercent = policy.SharePercent
+	}
+	if policy.ReservePercent > 0 && policy.ReservePercent <= maxWindowBudgetReservePercent {
+		effective.ReservePercent = policy.ReservePercent
+	}
+	return effective
+}
+
 // windowBudgetBytes computes the memory ArtX may commit to receive windows
-// from one absolute memory reading:
+// from one absolute memory reading and one policy:
 //
 //	min(SharePercent * total, available - ReservePercent * total), floored at 0
 //
 // The bool reports whether the reading was usable at all; false means the
 // budget clamp must not be applied.
-func windowBudgetBytes(total, available uint64) (uint64, bool) {
+func windowBudgetBytes(total, available uint64, policy WindowBudgetPolicy) (uint64, bool) {
 	if total == 0 || available == 0 {
 		return 0, false
 	}
-	share := percentOf(total, WindowBudgetSharePercent)
-	reserve := percentOf(total, WindowBudgetReservePercent)
+	effective := policy.normalized()
+	share := percentOf(total, effective.SharePercent)
+	reserve := percentOf(total, effective.ReservePercent)
 	if available <= reserve {
 		return 0, true
 	}
@@ -56,9 +128,36 @@ func (governor *PressureGovernor) WindowBudgetBytes() (uint64, bool) {
 		return 0, false
 	}
 	governor.mu.RLock()
-	total, available := governor.memoryTotal, governor.memoryAvailable
+	total, available, policy := governor.memoryTotal, governor.memoryAvailable, governor.budget
 	governor.mu.RUnlock()
-	return windowBudgetBytes(total, available)
+	return windowBudgetBytes(total, available, policy)
+}
+
+// SetWindowBudgetPolicy replaces the budget policy. Out-of-range and zero
+// fields fall back to their defaults, so the governor always holds a usable
+// policy. The change takes effect on the next negotiation — established
+// connections keep the window they already negotiated. A nil governor is a
+// no-op.
+func (governor *PressureGovernor) SetWindowBudgetPolicy(policy WindowBudgetPolicy) {
+	if governor == nil {
+		return
+	}
+	effective := policy.normalized()
+	governor.mu.Lock()
+	governor.budget = effective
+	governor.mu.Unlock()
+}
+
+// WindowBudgetPolicy is the policy currently in force. A nil governor reports
+// the defaults.
+func (governor *PressureGovernor) WindowBudgetPolicy() WindowBudgetPolicy {
+	if governor == nil {
+		return DefaultWindowBudgetPolicy()
+	}
+	governor.mu.RLock()
+	policy := governor.budget
+	governor.mu.RUnlock()
+	return policy
 }
 
 // budgetWindowScale is the largest scale in [0, MaxWindowScale] for which every

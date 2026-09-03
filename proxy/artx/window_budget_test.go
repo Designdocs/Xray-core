@@ -53,7 +53,7 @@ func TestWindowBudgetBytesTakesTheTighterOfShareAndReserve(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, known := windowBudgetBytes(total, test.available)
+			got, known := windowBudgetBytes(total, test.available, WindowBudgetPolicy{})
 			if !known {
 				t.Fatal("budget reported unknown for a usable reading")
 			}
@@ -259,5 +259,129 @@ func TestReportedCeilingReflectsTheBudgetNotOnlyPressure(t *testing.T) {
 	}
 	if got := RuntimeStatsFromManager(manager, "artx-budgeted").FlowControlPressureCeiling; got != 1 {
 		t.Fatalf("ceiling with 60 live connections = %d, want 1", got)
+	}
+}
+
+func TestWindowBudgetPolicyNormalizesZerosAndOutOfRange(t *testing.T) {
+	defaults := DefaultWindowBudgetPolicy()
+	tests := []struct {
+		name      string
+		policy    WindowBudgetPolicy
+		want      WindowBudgetPolicy
+		wantValid bool
+	}{
+		{name: "zero value is the default", policy: WindowBudgetPolicy{}, want: defaults, wantValid: true},
+		{
+			name:      "zero share keeps the default share",
+			policy:    WindowBudgetPolicy{ReservePercent: 30},
+			want:      WindowBudgetPolicy{SharePercent: defaults.SharePercent, ReservePercent: 30},
+			wantValid: true,
+		},
+		{
+			name:      "zero reserve keeps the default reserve",
+			policy:    WindowBudgetPolicy{SharePercent: 50},
+			want:      WindowBudgetPolicy{SharePercent: 50, ReservePercent: defaults.ReservePercent},
+			wantValid: true,
+		},
+		{
+			name:      "both configured pass through",
+			policy:    WindowBudgetPolicy{SharePercent: 100, ReservePercent: 99},
+			want:      WindowBudgetPolicy{SharePercent: 100, ReservePercent: 99},
+			wantValid: true,
+		},
+		{
+			name:      "share above the maximum falls back",
+			policy:    WindowBudgetPolicy{SharePercent: 101, ReservePercent: 30},
+			want:      WindowBudgetPolicy{SharePercent: defaults.SharePercent, ReservePercent: 30},
+			wantValid: false,
+		},
+		{
+			name:      "reserve above the maximum falls back",
+			policy:    WindowBudgetPolicy{SharePercent: 50, ReservePercent: 100},
+			want:      WindowBudgetPolicy{SharePercent: 50, ReservePercent: defaults.ReservePercent},
+			wantValid: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.policy.normalized(); got != test.want {
+				t.Fatalf("normalized() = %+v, want %+v", got, test.want)
+			}
+			err := test.policy.Validate()
+			if test.wantValid && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+			if !test.wantValid && err == nil {
+				t.Fatal("Validate() = nil, want an error naming the rejected field")
+			}
+		})
+	}
+}
+
+func TestWindowBudgetPolicyChangesTheBudget(t *testing.T) {
+	governor := NewPressureGovernor(PressureGovernorConfig{})
+	governor.Observe(memorySample(1000*mib, 900*mib), time.Unix(0, 0))
+	if got, _ := governor.WindowBudgetBytes(); got != 250*mib {
+		t.Fatalf("default budget = %d, want %d", got, 250*mib)
+	}
+	// Doubling the share doubles the budget, so twice as many connections
+	// still fit inside the widest window.
+	governor.SetWindowBudgetPolicy(WindowBudgetPolicy{SharePercent: 50})
+	if got, _ := governor.WindowBudgetBytes(); got != 500*mib {
+		t.Fatalf("configured budget = %d, want %d", got, 500*mib)
+	}
+	if got := governor.WindowBudgetPolicy(); got.SharePercent != 50 {
+		t.Fatalf("WindowBudgetPolicy() = %+v, want share 50", got)
+	}
+	// A rejected value must leave a usable policy behind, not a zero budget.
+	governor.SetWindowBudgetPolicy(WindowBudgetPolicy{SharePercent: 200})
+	if got, _ := governor.WindowBudgetBytes(); got != 250*mib {
+		t.Fatalf("budget after a rejected share = %d, want the default %d", got, 250*mib)
+	}
+	// A nil governor tolerates both calls and reports the defaults.
+	(*PressureGovernor)(nil).SetWindowBudgetPolicy(WindowBudgetPolicy{SharePercent: 50})
+	if got := (*PressureGovernor)(nil).WindowBudgetPolicy(); got != DefaultWindowBudgetPolicy() {
+		t.Fatalf("nil governor policy = %+v, want the defaults", got)
+	}
+}
+
+func TestSetSharedWindowBudgetPolicyAppliesBeforeAndAfterSamples(t *testing.T) {
+	t.Cleanup(func() { SetSharedPressureGovernor(nil) })
+	SetSharedPressureGovernor(nil)
+
+	// Installed before any sample: the setter has to create the shared
+	// governor, the way ObserveHostPressure does.
+	SetSharedWindowBudgetPolicy(WindowBudgetPolicy{SharePercent: 50})
+	governor := SharedPressureGovernor()
+	if governor == nil {
+		t.Fatal("SetSharedWindowBudgetPolicy did not create the shared governor")
+	}
+	if got := governor.WindowBudgetPolicy(); got.SharePercent != 50 {
+		t.Fatalf("policy = %+v, want share 50", got)
+	}
+
+	ObserveHostPressure(memorySample(1000*mib, 900*mib))
+	if got, _ := SharedPressureGovernor().WindowBudgetBytes(); got != 500*mib {
+		t.Fatalf("budget = %d, want %d", got, 500*mib)
+	}
+	// And installed again after samples have arrived: the memory reading is
+	// kept, only the policy moves.
+	SetSharedWindowBudgetPolicy(WindowBudgetPolicy{SharePercent: 10})
+	if got, _ := SharedPressureGovernor().WindowBudgetBytes(); got != 100*mib {
+		t.Fatalf("budget after reconfiguration = %d, want %d", got, 100*mib)
+	}
+}
+
+func TestBudgetWindowScaleFollowsThePolicy(t *testing.T) {
+	// 240 MiB of budget fits 15 connections at 16 MiB, the widest window.
+	if got := budgetWindowScale(testBudget240MB, 14); got != MaxWindowScale {
+		t.Fatalf("scale at 15 connections = %d, want %d", got, MaxWindowScale)
+	}
+	if got := budgetWindowScale(testBudget240MB, 15); got != 3 {
+		t.Fatalf("scale at 16 connections = %d, want 3", got)
+	}
+	// Doubling the budget doubles the connection count that keeps scale 4.
+	if got := budgetWindowScale(2*testBudget240MB, 29); got != MaxWindowScale {
+		t.Fatalf("scale at 30 connections on a doubled budget = %d, want %d", got, MaxWindowScale)
 	}
 }
