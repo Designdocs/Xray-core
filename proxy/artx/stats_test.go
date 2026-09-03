@@ -3,8 +3,10 @@ package artx
 import (
 	"context"
 	"testing"
+	"time"
 
 	appstats "github.com/xtls/xray-core/app/stats"
+	featurestats "github.com/xtls/xray-core/features/stats"
 )
 
 func TestRuntimeStatsMirrorUsesInboundTag(t *testing.T) {
@@ -13,6 +15,7 @@ func TestRuntimeStatsMirrorUsesInboundTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	counters := runtimeCounters{manager: manager}
+	t.Cleanup(counters.release)
 	counters.bind("artx-canary")
 	counters.add(runtimeCounterTotalConnections, 1)
 	counters.add(runtimeCounterActiveConnections, 1)
@@ -42,15 +45,18 @@ func TestRuntimeStatsMirrorUsesInboundTag(t *testing.T) {
 		FallbackHits:          2,
 		FallbackErrors:        1,
 		FlowControlNegotiated: 3,
-		NativeActive:          1,
-		NativeAccepted:        2,
-		NativeRejected:        3,
-		NativeDatagramsUp:     4,
-		NativeDatagramsDown:   5,
-		NativeBytesUp:         64,
-		NativeBytesDown:       128,
-		NativeTransportErrors: 1,
-		NativeTargetErrors:    2,
+		// bind() seeds the gauge with the governor's ceiling, which is wide
+		// open here because no pressure sample has been observed.
+		FlowControlPressureCeiling: uint64(MaxWindowScale),
+		NativeActive:               1,
+		NativeAccepted:             2,
+		NativeRejected:             3,
+		NativeDatagramsUp:          4,
+		NativeDatagramsDown:        5,
+		NativeBytesUp:              64,
+		NativeBytesDown:            128,
+		NativeTransportErrors:      1,
+		NativeTargetErrors:         2,
 	}
 	if got != want {
 		t.Fatalf("RuntimeStatsFromManager() = %#v, want %#v", got, want)
@@ -87,5 +93,77 @@ func TestNativeUDPHandlerBindsRuntimeCounters(t *testing.T) {
 	}
 	if manager.GetCounter(runtimeCounterName("artx-native", runtimeCounterNativeAccepted)) == nil {
 		t.Fatal("native UDP handler did not bind its runtime counters")
+	}
+}
+
+func newStatsManagerForTest(t *testing.T) featurestats.Manager {
+	t.Helper()
+	manager, err := appstats.NewManager(context.Background(), &appstats.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
+
+func withSharedPressureGovernor(t *testing.T, governor *PressureGovernor) {
+	t.Helper()
+	previous := SharedPressureGovernor()
+	SetSharedPressureGovernor(governor)
+	t.Cleanup(func() { SetSharedPressureGovernor(previous) })
+}
+
+func TestBoundCountersSeedPressureCeilingWithoutAccepts(t *testing.T) {
+	withSharedPressureGovernor(t, nil)
+
+	manager := newStatsManagerForTest(t)
+	counters := &runtimeCounters{manager: manager}
+	t.Cleanup(counters.release)
+	counters.bind("artx-idle")
+
+	if got := RuntimeStatsFromManager(manager, "artx-idle").FlowControlPressureCeiling; got != uint64(MaxWindowScale) {
+		t.Fatalf("idle inbound ceiling = %d, want %d", got, uint64(MaxWindowScale))
+	}
+}
+
+func TestObserveHostPressureRefreshesBoundCounters(t *testing.T) {
+	withSharedPressureGovernor(t, NewPressureGovernor(PressureGovernorConfig{}))
+
+	manager := newStatsManagerForTest(t)
+	counters := &runtimeCounters{manager: manager}
+	t.Cleanup(counters.release)
+	counters.bind("artx-pressured")
+
+	if got := RuntimeStatsFromManager(manager, "artx-pressured").FlowControlPressureCeiling; got != uint64(MaxWindowScale) {
+		t.Fatalf("seeded ceiling = %d, want %d", got, uint64(MaxWindowScale))
+	}
+
+	for sample := 0; sample < minPressureSamples; sample++ {
+		ObserveHostPressure(PressureSample{CPUPercent: 85})
+	}
+
+	// No connection was accepted in between: the gauge must still follow the
+	// governor down to the rung that an 85% sustained load selects.
+	if got := RuntimeStatsFromManager(manager, "artx-pressured").FlowControlPressureCeiling; got != 2 {
+		t.Fatalf("ceiling after host pressure = %d, want 2", got)
+	}
+}
+
+func TestPerInboundGovernorDrivesReportedCeiling(t *testing.T) {
+	withSharedPressureGovernor(t, nil)
+
+	governor := NewPressureGovernor(PressureGovernorConfig{})
+	manager := newStatsManagerForTest(t)
+	counters := &runtimeCounters{manager: manager, ceilingSource: governor.Ceiling}
+	t.Cleanup(counters.release)
+	counters.bind("artx-owned")
+
+	now := time.Now()
+	for sample := 0; sample < minPressureSamples; sample++ {
+		governor.Observe(PressureSample{MemoryPercent: 95}, now.Add(time.Duration(sample)*time.Second))
+	}
+	publishPressureCeilings()
+
+	if got := RuntimeStatsFromManager(manager, "artx-owned").FlowControlPressureCeiling; got != 0 {
+		t.Fatalf("ceiling under a per-inbound governor = %d, want 0", got)
 	}
 }

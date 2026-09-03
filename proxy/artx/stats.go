@@ -62,6 +62,10 @@ type runtimeCounters struct {
 	bindMu                sync.Mutex
 	managed               [runtimeCounterCount]featurestats.Counter
 	managedBound          atomic.Bool
+	// ceilingSource resolves the window scale ceiling the owning inbound would
+	// apply right now. It is installed once at construction and never mutated,
+	// so it is safe to read from the pressure sampler goroutine.
+	ceilingSource func() uint32
 }
 
 type runtimeCounter int
@@ -167,6 +171,67 @@ func (counters *runtimeCounters) bind(inboundTag string) {
 		counters.managed[metric] = counter
 	}
 	counters.managedBound.Store(true)
+	// Seed the pressure ceiling gauge so an inbound that has not negotiated a
+	// single stream yet reports the governor's real ceiling instead of the
+	// zero value, which reads as "clamped to legacy windows".
+	counters.refreshPressureCeiling()
+	registerBoundCounters(counters)
+}
+
+// release detaches the counters from the pressure fan-out. Inbound handlers
+// call it through Server.Close when Xray tears an inbound down.
+func (counters *runtimeCounters) release() {
+	unregisterBoundCounters(counters)
+}
+
+// currentCeiling resolves the ceiling this inbound would apply right now,
+// falling back to the process-wide governor when no resolver was installed.
+func (counters *runtimeCounters) currentCeiling() uint32 {
+	if counters.ceilingSource != nil {
+		return counters.ceilingSource()
+	}
+	return SharedPressureGovernor().Ceiling()
+}
+
+// refreshPressureCeiling republishes the current ceiling into the gauge.
+func (counters *runtimeCounters) refreshPressureCeiling() {
+	counters.set(runtimeCounterFlowControlPressureCeiling, uint64(counters.currentCeiling()))
+}
+
+// boundCounters tracks every runtimeCounters that has bound its metrics to a
+// stats manager, so host pressure changes can refresh the ceiling gauge on
+// inbounds that are idle. Membership is bounded by the number of live ArtX
+// inbounds; Server.Close removes an entry when an inbound is torn down.
+var boundCounters = struct {
+	mu      sync.Mutex
+	members map[*runtimeCounters]struct{}
+}{members: make(map[*runtimeCounters]struct{})}
+
+func registerBoundCounters(counters *runtimeCounters) {
+	boundCounters.mu.Lock()
+	boundCounters.members[counters] = struct{}{}
+	boundCounters.mu.Unlock()
+}
+
+func unregisterBoundCounters(counters *runtimeCounters) {
+	boundCounters.mu.Lock()
+	delete(boundCounters.members, counters)
+	boundCounters.mu.Unlock()
+}
+
+// publishPressureCeilings refreshes the ceiling gauge of every bound inbound.
+// The host pressure sampler calls it after each observation so the reported
+// ceiling stays truthful even when no new connection arrives.
+func publishPressureCeilings() {
+	boundCounters.mu.Lock()
+	members := make([]*runtimeCounters, 0, len(boundCounters.members))
+	for counters := range boundCounters.members {
+		members = append(members, counters)
+	}
+	boundCounters.mu.Unlock()
+	for _, counters := range members {
+		counters.refreshPressureCeiling()
+	}
 }
 
 func (counters *runtimeCounters) add(metric runtimeCounter, delta int64) {

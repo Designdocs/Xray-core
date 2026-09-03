@@ -256,4 +256,7 @@ func ObserveHostPressure(sample PressureSample) {
 	governor := sharedPressure.governor
 	sharedPressure.mu.Unlock()
 	governor.Observe(sample, time.Now())
+	// Fan the (possibly new) ceiling out to every bound inbound so the reported
+	// gauge follows host pressure even on inbounds that are accepting nothing.
+	publishPressureCeilings()
 }

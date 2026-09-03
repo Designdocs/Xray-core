@@ -125,6 +125,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if instance := core.FromContext(ctx); instance != nil {
 		server.stats.manager, _ = instance.GetFeature(featurestats.ManagerType()).(featurestats.Manager)
 	}
+	server.stats.ceilingSource = server.pressureCeiling
 	if config.Fallback != nil && config.Fallback.Enabled {
 		fallback, err := NewHTTPFallback(config.Fallback.Origin)
 		if err != nil {
@@ -372,6 +373,13 @@ func (s *Server) SetUserRateLookup(lookup UserRateLookup) {
 
 func (s *Server) Stats() RuntimeStats {
 	return s.stats.snapshot()
+}
+
+// Close implements common.Closable. It only detaches this inbound's counters
+// from the host pressure fan-out; there is no other teardown to do.
+func (s *Server) Close() error {
+	s.stats.release()
+	return nil
 }
 
 func (s *Server) handlePreAuthFailure(ctx context.Context, connection *tls.Conn, prefix []byte, authErr error) error {
