@@ -20,8 +20,10 @@ type RuntimeStats struct {
 	// FlowControlScales counts negotiations per selected window scale, indexed
 	// by the scale itself. Index 0 is the legacy window.
 	FlowControlScales [MaxWindowScale + 1]uint64
-	// FlowControlPressureCeiling is the ceiling the host pressure governor
-	// applied to the most recent negotiation, not a running total.
+	// FlowControlPressureCeiling is the effective window scale ceiling — the
+	// sustained host pressure rung intersected with the instantaneous memory
+	// budget clamp — as of the most recent negotiation or refresh, not a
+	// running total.
 	FlowControlPressureCeiling uint64
 	// FlowControlAutoFallback counts auto-policy negotiations that could not
 	// read an RTT and fell back to the node maximum.
@@ -62,9 +64,10 @@ type runtimeCounters struct {
 	bindMu                sync.Mutex
 	managed               [runtimeCounterCount]featurestats.Counter
 	managedBound          atomic.Bool
-	// ceilingSource resolves the window scale ceiling the owning inbound would
-	// apply right now. It is installed once at construction and never mutated,
-	// so it is safe to read from the pressure sampler goroutine.
+	// ceilingSource resolves the effective window scale ceiling (pressure rung
+	// intersected with the memory budget clamp) the owning inbound would apply
+	// right now. It is installed once at construction and never mutated, so it
+	// is safe to read from the pressure sampler goroutine.
 	ceilingSource func() uint32
 }
 
@@ -171,9 +174,9 @@ func (counters *runtimeCounters) bind(inboundTag string) {
 		counters.managed[metric] = counter
 	}
 	counters.managedBound.Store(true)
-	// Seed the pressure ceiling gauge so an inbound that has not negotiated a
-	// single stream yet reports the governor's real ceiling instead of the
-	// zero value, which reads as "clamped to legacy windows".
+	// Seed the ceiling gauge so an inbound that has not negotiated a single
+	// stream yet reports the real effective ceiling instead of the zero value,
+	// which reads as "clamped to legacy windows".
 	counters.refreshPressureCeiling()
 	registerBoundCounters(counters)
 }
@@ -184,23 +187,27 @@ func (counters *runtimeCounters) release() {
 	unregisterBoundCounters(counters)
 }
 
-// currentCeiling resolves the ceiling this inbound would apply right now,
-// falling back to the process-wide governor when no resolver was installed.
+// currentCeiling resolves the effective ceiling this inbound would apply right
+// now, falling back to the process-wide governor when no resolver was
+// installed. The fallback applies the budget clamp too, using this inbound's
+// own active-connection count.
 func (counters *runtimeCounters) currentCeiling() uint32 {
 	if counters.ceilingSource != nil {
 		return counters.ceilingSource()
 	}
-	return SharedPressureGovernor().Ceiling()
+	governor := SharedPressureGovernor()
+	return budgetCeiling(governor, governor.Ceiling(), counters.activeConnections.Load())
 }
 
-// refreshPressureCeiling republishes the current ceiling into the gauge.
+// refreshPressureCeiling republishes the current effective ceiling into the
+// gauge.
 func (counters *runtimeCounters) refreshPressureCeiling() {
 	counters.set(runtimeCounterFlowControlPressureCeiling, uint64(counters.currentCeiling()))
 }
 
 // boundCounters tracks every runtimeCounters that has bound its metrics to a
-// stats manager, so host pressure changes can refresh the ceiling gauge on
-// inbounds that are idle. Membership is bounded by the number of live ArtX
+// stats manager, so host pressure and budget changes can refresh the ceiling
+// gauge on inbounds that are idle. Membership is bounded by the number of live ArtX
 // inbounds; Server.Close removes an entry when an inbound is torn down.
 var boundCounters = struct {
 	mu      sync.Mutex

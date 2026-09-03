@@ -308,12 +308,12 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 // negotiateStreamWindowScale picks the wire-v1 window scale for one stream.
 // The legacy policy just clamps the client offer to the node maximum; the auto
 // policy additionally sizes the window from the connection's bandwidth-delay
-// product and the current host pressure ceiling.
+// product and the current effective ceiling.
 func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connection net.Conn, user *protocol.MemoryUser) uint32 {
 	if !s.flowControlAuto {
 		return negotiateWindowScale(settings, s.maxWindowScale, s.wireVersion)
 	}
-	ceiling := s.pressureCeiling()
+	ceiling := s.negotiationCeiling()
 	s.stats.set(runtimeCounterFlowControlPressureCeiling, uint64(ceiling))
 	var rtt autoRTTSample
 	if s.sampleRTT != nil {
@@ -326,14 +326,38 @@ func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connecti
 	return scale
 }
 
-func (s *Server) pressureCeiling() uint32 {
+// governor resolves the pressure governor this inbound reads, falling back to
+// the process-wide one.
+func (s *Server) governor() *PressureGovernor {
 	s.autoMu.RLock()
 	governor := s.pressure
 	s.autoMu.RUnlock()
 	if governor == nil {
 		governor = SharedPressureGovernor()
 	}
-	return governor.Ceiling()
+	return governor
+}
+
+// pressureCeiling is the effective window scale ceiling for the next
+// connection to arrive: the sustained-load rung intersected with the
+// instantaneous memory budget clamp. It is what the reported gauge shows,
+// because an operator needs to see the ceiling that actually applies rather
+// than only the pressure half of it.
+func (s *Server) pressureCeiling() uint32 {
+	governor := s.governor()
+	return budgetCeiling(governor, governor.Ceiling(), s.stats.activeConnections.Load())
+}
+
+// negotiationCeiling is pressureCeiling for a connection Process has already
+// counted into the active gauge, so the budget's own "+1 for the connection
+// being negotiated" is not charged twice.
+func (s *Server) negotiationCeiling() uint32 {
+	active := s.stats.activeConnections.Load()
+	if active > 0 {
+		active--
+	}
+	governor := s.governor()
+	return budgetCeiling(governor, governor.Ceiling(), active)
 }
 
 func (s *Server) targetRateFor(user *protocol.MemoryUser) uint64 {

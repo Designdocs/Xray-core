@@ -23,11 +23,20 @@ const (
 	pressureHysteresis = 10.0
 )
 
-// PressureSample is one host utilisation observation. Both values are
-// percentages in [0, 100]; the governor judges on whichever is higher.
+// PressureSample is one host utilisation observation. CPUPercent and
+// MemoryPercent are percentages in [0, 100]; the sustained-load ladder judges
+// on whichever is higher.
+//
+// MemoryTotalBytes and MemoryAvailableBytes carry the same memory reading in
+// absolute bytes and drive the instantaneous window budget, which is a
+// separate mechanism from the ladder. A zero in either field means "memory
+// size unknown": the budget clamp then stays inactive and only the ladder
+// applies.
 type PressureSample struct {
-	CPUPercent    float64
-	MemoryPercent float64
+	CPUPercent           float64
+	MemoryPercent        float64
+	MemoryTotalBytes     uint64
+	MemoryAvailableBytes uint64
 }
 
 func (sample PressureSample) load() float64 {
@@ -35,6 +44,11 @@ func (sample PressureSample) load() float64 {
 		return sample.MemoryPercent
 	}
 	return sample.CPUPercent
+}
+
+// memoryKnown reports whether the sample carries usable absolute memory sizes.
+func (sample PressureSample) memoryKnown() bool {
+	return sample.MemoryTotalBytes > 0 && sample.MemoryAvailableBytes > 0
 }
 
 // PressureGovernorConfig tunes the governor windows. Zero values select the
@@ -73,6 +87,12 @@ type PressureGovernor struct {
 	ceiling         uint32
 	qualifiedSince  time.Time
 	qualifiedActive bool
+	// memoryTotal and memoryAvailable hold the most recent known absolute
+	// memory reading. They are deliberately not averaged: the window budget
+	// has to react to the newest observation, because a burst of accepts can
+	// commit the whole budget between two samples.
+	memoryTotal     uint64
+	memoryAvailable uint64
 }
 
 // NewPressureGovernor returns a governor that starts wide open at
@@ -112,6 +132,10 @@ func (governor *PressureGovernor) Observe(sample PressureSample, now time.Time) 
 
 	if count := len(governor.samples); count > 0 && now.Before(governor.samples[count-1].at) {
 		return
+	}
+	if sample.memoryKnown() {
+		governor.memoryTotal = sample.MemoryTotalBytes
+		governor.memoryAvailable = sample.MemoryAvailableBytes
 	}
 	governor.samples = append(governor.samples, pressureObservation{at: now, load: sample.load()})
 	governor.evictLocked(now)
