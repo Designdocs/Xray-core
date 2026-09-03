@@ -25,6 +25,9 @@ type ArtXServerConfig struct {
 	Fallback       *ArtXFallbackConfig `json:"fallback"`
 	UDPEnabled     bool                `json:"udpEnabled"`
 	MaxWindowScale uint32              `json:"maxWindowScale"`
+	// FlowControlAuto turns maxWindowScale into an upper bound and lets each
+	// connection size its own window from the measured bandwidth-delay product.
+	FlowControlAuto bool `json:"flowControlAuto"`
 }
 
 type ArtXFallbackConfig struct {
@@ -53,12 +56,13 @@ func (config *ArtXServerConfig) Build() (proto.Message, error) {
 		return nil, err
 	}
 	built := &artx.ServerConfig{
-		TlsSettings:    tlsSettings.(*transporttls.Config),
-		WireVersion:    config.WireVersion,
-		ProfileVersion: config.ProfileVersion,
-		UdpEnabled:     config.UDPEnabled,
-		MaxWindowScale: config.MaxWindowScale,
-		Users:          make([]*protocol.User, 0, len(config.Users)),
+		TlsSettings:     tlsSettings.(*transporttls.Config),
+		WireVersion:     config.WireVersion,
+		ProfileVersion:  config.ProfileVersion,
+		UdpEnabled:      config.UDPEnabled,
+		MaxWindowScale:  config.MaxWindowScale,
+		FlowControlAuto: config.FlowControlAuto,
+		Users:           make([]*protocol.User, 0, len(config.Users)),
 	}
 	if config.Fallback != nil {
 		origin := strings.TrimSpace(config.Fallback.Origin)

@@ -26,4 +26,7 @@ message ServerConfig {
   FallbackConfig fallback = 5;
   bool udp_enabled = 6;
   uint32 max_window_scale = 7;
+  // When set, max_window_scale is only the upper bound and each connection
+  // picks its own scale from the measured bandwidth-delay product.
+  bool flow_control_auto = 8;
 }

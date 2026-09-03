@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -52,6 +53,13 @@ type Server struct {
 	nativeUDPDummyPSK [nativeUDPTagLength]byte
 	now               func() time.Time
 	targetReadyWait   time.Duration
+
+	flowControlAuto bool
+	sampleRTT       func(net.Conn) autoRTTSample
+
+	autoMu    sync.RWMutex
+	pressure  *PressureGovernor
+	userRates UserRateLookup
 }
 
 func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
@@ -98,6 +106,8 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 		maxWindowScale:  min(config.MaxWindowScale, MaxWindowScale),
 		now:             time.Now,
 		targetReadyWait: wireV4TargetReadyWait,
+		flowControlAuto: config.FlowControlAuto,
+		sampleRTT:       sampleSocketRTT,
 	}
 	if _, err := rand.Read(server.nativeUDPDummyPSK[:]); err != nil {
 		return nil, fmt.Errorf("artx: initialize native UDP dummy key: %w", err)
@@ -261,7 +271,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	}
 	switch openFrame.Type {
 	case FrameTCPSyn:
-		effectiveScale := negotiateWindowScale(settings, s.maxWindowScale, s.wireVersion)
+		effectiveScale := s.negotiateStreamWindowScale(settings, connection, user)
 		limits := flowControlLimitsForScale(effectiveScale)
 		if err := writeExpandedReceiveCredit(writer, limits, true); err != nil {
 			return fmt.Errorf("artx: expand receive window: %w", err)
@@ -269,6 +279,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 		if effectiveScale != 0 {
 			s.stats.add(runtimeCounterFlowControlNegotiated, 1)
 		}
+		s.stats.add(flowControlScaleCounter(effectiveScale), 1)
 		destination, err := DecodeTCPDestination(openFrame.Payload)
 		if err != nil {
 			return err
@@ -291,6 +302,72 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	default:
 		return errors.New("artx: first stream frame must be TCP_SYN or UDP_ASSOC on stream 1")
 	}
+}
+
+// negotiateStreamWindowScale picks the wire-v1 window scale for one stream.
+// The legacy policy just clamps the client offer to the node maximum; the auto
+// policy additionally sizes the window from the connection's bandwidth-delay
+// product and the current host pressure ceiling.
+func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connection net.Conn, user *protocol.MemoryUser) uint32 {
+	if !s.flowControlAuto {
+		return negotiateWindowScale(settings, s.maxWindowScale, s.wireVersion)
+	}
+	ceiling := s.pressureCeiling()
+	s.stats.set(runtimeCounterFlowControlPressureCeiling, uint64(ceiling))
+	var rtt autoRTTSample
+	if s.sampleRTT != nil {
+		rtt = s.sampleRTT(connection)
+	}
+	scale, fellBack := negotiateAutoWindowScale(settings, s.maxWindowScale, s.wireVersion, rtt, s.targetRateFor(user), ceiling)
+	if fellBack {
+		s.stats.add(runtimeCounterFlowControlAutoFallback, 1)
+	}
+	return scale
+}
+
+func (s *Server) pressureCeiling() uint32 {
+	s.autoMu.RLock()
+	governor := s.pressure
+	s.autoMu.RUnlock()
+	if governor == nil {
+		governor = SharedPressureGovernor()
+	}
+	return governor.Ceiling()
+}
+
+func (s *Server) targetRateFor(user *protocol.MemoryUser) uint64 {
+	if user == nil {
+		return DefaultAutoTargetRate
+	}
+	s.autoMu.RLock()
+	lookup := s.userRates
+	s.autoMu.RUnlock()
+	if lookup == nil {
+		lookup = SharedUserRateLookup()
+	}
+	if lookup == nil {
+		return DefaultAutoTargetRate
+	}
+	if rate := lookup(user.Email); rate != 0 {
+		return rate
+	}
+	return DefaultAutoTargetRate
+}
+
+// SetPressureGovernor installs a per-inbound host pressure governor. A nil
+// governor makes the inbound fall back to the process-wide one.
+func (s *Server) SetPressureGovernor(governor *PressureGovernor) {
+	s.autoMu.Lock()
+	s.pressure = governor
+	s.autoMu.Unlock()
+}
+
+// SetUserRateLookup installs a per-inbound plan rate resolver. A nil lookup
+// makes the inbound fall back to the process-wide one.
+func (s *Server) SetUserRateLookup(lookup UserRateLookup) {
+	s.autoMu.Lock()
+	s.userRates = lookup
+	s.autoMu.Unlock()
 }
 
 func (s *Server) Stats() RuntimeStats {
