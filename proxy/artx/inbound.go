@@ -47,19 +47,24 @@ type Server struct {
 	wireVersion       uint32
 	profileVersion    uint32
 	udpEnabled        bool
-	maxWindowScale    uint32
 	wireV3DummyPSK    [wireV3TagLength]byte
 	wireV4DummyPSK    [wireV4TagLength]byte
 	nativeUDPDummyPSK [nativeUDPTagLength]byte
 	now               func() time.Time
 	targetReadyWait   time.Duration
 
-	flowControlAuto bool
-	sampleRTT       func(net.Conn) autoRTTSample
+	sampleRTT func(net.Conn) autoRTTSample
 
-	autoMu    sync.RWMutex
-	pressure  *PressureGovernor
-	userRates UserRateLookup
+	// autoMu guards the runtime-mutable half of the flow-control policy.
+	// flowControlAuto and maxWindowScale live here rather than in the
+	// immutable block above because the agent retiers a live node in
+	// place: rebuilding the inbound to change a tier would close its
+	// listener and drop every session on it.
+	autoMu          sync.RWMutex
+	flowControlAuto bool
+	maxWindowScale  uint32
+	pressure        *PressureGovernor
+	userRates       UserRateLookup
 }
 
 func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
@@ -310,8 +315,9 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 // policy additionally sizes the window from the connection's bandwidth-delay
 // product and the current effective ceiling.
 func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connection net.Conn, user *protocol.MemoryUser) uint32 {
-	if !s.flowControlAuto {
-		return negotiateWindowScale(settings, s.maxWindowScale, s.wireVersion)
+	auto, maxWindowScale := s.flowControlPolicy()
+	if !auto {
+		return negotiateWindowScale(settings, maxWindowScale, s.wireVersion)
 	}
 	ceiling := s.negotiationCeiling()
 	s.stats.set(runtimeCounterFlowControlPressureCeiling, uint64(ceiling))
@@ -319,7 +325,7 @@ func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connecti
 	if s.sampleRTT != nil {
 		rtt = s.sampleRTT(connection)
 	}
-	scale, fellBack := negotiateAutoWindowScale(settings, s.maxWindowScale, s.wireVersion, rtt, s.targetRateFor(user), ceiling)
+	scale, fellBack := negotiateAutoWindowScale(settings, maxWindowScale, s.wireVersion, rtt, s.targetRateFor(user), ceiling)
 	if fellBack {
 		s.stats.add(runtimeCounterFlowControlAutoFallback, 1)
 	}
@@ -377,6 +383,27 @@ func (s *Server) targetRateFor(user *protocol.MemoryUser) uint64 {
 		return rate
 	}
 	return DefaultAutoTargetRate
+}
+
+// flowControlPolicy snapshots the tier the next negotiation runs against.
+// Both halves are read together so a concurrent retier can never be seen
+// half-applied — an auto tier paired with the previous tier's ceiling would
+// size windows against a bound the operator never chose.
+func (s *Server) flowControlPolicy() (auto bool, maxWindowScale uint32) {
+	s.autoMu.RLock()
+	defer s.autoMu.RUnlock()
+	return s.flowControlAuto, s.maxWindowScale
+}
+
+// SetFlowControl retiers a running inbound. Sessions already established keep
+// the window they negotiated — a scale is fixed for the life of a stream —
+// so the new tier takes effect as connections turn over, which is the price
+// of not dropping every one of them to change a setting.
+func (s *Server) SetFlowControl(auto bool, maxWindowScale uint32) {
+	s.autoMu.Lock()
+	s.flowControlAuto = auto
+	s.maxWindowScale = min(maxWindowScale, MaxWindowScale)
+	s.autoMu.Unlock()
 }
 
 // SetPressureGovernor installs a per-inbound host pressure governor. A nil
