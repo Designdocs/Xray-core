@@ -26,6 +26,41 @@ remembers the reason for. This file is the ledger that stops that.
 
 ## Open
 
+### splithttp: XmuxConfig copied by value, lock and all
+
+| | |
+|---|---|
+| Ours | `fix(upstream): stop copying XmuxConfig by value` (find it with `git log --grep`) |
+| Files | `transport/internet/splithttp/dialer.go`, `transport/internet/splithttp/mux.go`, `transport/internet/splithttp/mux_test.go` |
+| Tests | `mux_test.go` (upstream's own, adjusted to the pointer signature) |
+| Reported upstream | **No.** Deliberate — we are not opening a PR. |
+
+`XmuxConfig` is a generated protobuf message, so it embeds
+`protoimpl.MessageState`, which contains a `sync.Mutex`. `getHTTPClient`
+dereferenced `transportConfig.Xmux` into a local and handed that copy to
+`NewXmuxManager`, which stored another copy in the manager — copying the mutex
+and the message's internal state twice per dial. `go vet` flags all four sites:
+
+```
+dialer.go:71: assignment copies lock value to xmuxConfig
+mux.go:52:    NewXmuxManager passes lock by value
+```
+
+`NewXmuxManager` now takes `*XmuxConfig` and substitutes an empty config when
+the caller passes nil, which is what the old value dance was for.
+
+**Check at each sync:**
+
+```bash
+git log --oneline HEAD..upstream/main -- \
+  transport/internet/splithttp/mux.go
+```
+
+Upstream fixing this means `NewXmuxManager` takes a pointer there too — take
+theirs and delete this entry.
+
+---
+
 ### splithttp: WaitReadCloser publishes the body outside the Wait channel
 
 | | |
