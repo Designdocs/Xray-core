@@ -72,7 +72,16 @@ type pressureObservation struct {
 //	load <  70%  -> ceiling 4
 //	load <  80%  -> ceiling 3
 //	load <  90%  -> ceiling 2
-//	load >= 90%  -> ceiling 0 (legacy windows)
+//	load >= 90%  -> ceiling 1
+//
+// Every rung costs exactly one scale, including the last one. The ladder used
+// to drop straight from 2 to 0 above 90%, which quartered the window in a
+// single step and, because the same rung is skipped on the way up, made the
+// climb back out a double step gated on the 80% threshold. It is also the
+// wrong reflex for the input: the ladder judges on max(cpu, memory), so a
+// CPU-saturated host with free memory would surrender its receive windows for
+// nothing. Scale 0 stays reachable through the window budget, which is the
+// half of the policy that actually reads absolute memory.
 //
 // Downgrades apply as soon as the window holds minPressureSamples samples.
 // Upgrades move one rung at a time and require the sustained mean to stay
@@ -223,7 +232,7 @@ func pressureCeilingForLoad(load float64) uint32 {
 	case load < 90:
 		return 2
 	default:
-		return 0
+		return 1
 	}
 }
 
@@ -237,15 +246,20 @@ func pressureEntryThreshold(ceiling uint32) float64 {
 	case 2:
 		return 90
 	default:
+		// Rung 1 is the ladder's floor: no load keeps a host out of it, so its
+		// entry threshold is the top of the scale.
 		return 100
 	}
 }
 
-// nextPressureCeiling is the single rung above the current one. Rung 1 is not
-// part of the ladder, so recovery from 0 lands on 2.
+// nextPressureCeiling is the single rung above the current one. The ladder
+// itself never selects 0 any more, but the rung is kept on the way up so a
+// governor that somehow holds it can still climb out.
 func nextPressureCeiling(ceiling uint32) (uint32, bool) {
 	switch ceiling {
 	case 0:
+		return 1, true
+	case 1:
 		return 2, true
 	case 2:
 		return 3, true

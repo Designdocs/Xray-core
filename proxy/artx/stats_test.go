@@ -163,7 +163,7 @@ func TestPerInboundGovernorDrivesReportedCeiling(t *testing.T) {
 	}
 	publishPressureCeilings()
 
-	if got := RuntimeStatsFromManager(manager, "artx-owned").FlowControlPressureCeiling; got != 0 {
-		t.Fatalf("ceiling under a per-inbound governor = %d, want 0", got)
+	if got := RuntimeStatsFromManager(manager, "artx-owned").FlowControlPressureCeiling; got != 1 {
+		t.Fatalf("ceiling under a per-inbound governor = %d, want 1", got)
 	}
 }
