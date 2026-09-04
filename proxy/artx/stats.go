@@ -189,14 +189,14 @@ func (counters *runtimeCounters) release() {
 
 // currentCeiling resolves the effective ceiling this inbound would apply right
 // now, falling back to the process-wide governor when no resolver was
-// installed. The fallback applies the budget clamp too, using this inbound's
-// own active-connection count.
+// installed. The fallback applies the budget clamp too, answering for a
+// connection that holds no credit yet.
 func (counters *runtimeCounters) currentCeiling() uint32 {
 	if counters.ceilingSource != nil {
 		return counters.ceilingSource()
 	}
 	governor := SharedPressureGovernor()
-	return budgetCeiling(governor, governor.Ceiling(), counters.activeConnections.Load())
+	return budgetCeiling(governor, governor.Ceiling(), 0)
 }
 
 // refreshPressureCeiling republishes the current effective ceiling into the

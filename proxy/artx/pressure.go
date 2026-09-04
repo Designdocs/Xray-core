@@ -2,6 +2,7 @@ package artx
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -105,6 +106,12 @@ type PressureGovernor struct {
 	// budget is the operator-tunable window budget policy. Always normalized,
 	// so it is safe to use without re-checking.
 	budget WindowBudgetPolicy
+
+	// committedWindow is the receive-window credit connections currently hold,
+	// in bytes. It is atomic rather than guarded by mu because it is written on
+	// every window grant and read on every growth decision, while mu is held
+	// across whole-sample bookkeeping.
+	committedWindow atomic.Uint64
 }
 
 // NewPressureGovernor returns a governor that starts wide open at

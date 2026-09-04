@@ -79,57 +79,27 @@ func TestWindowBudgetTracksTheNewestReading(t *testing.T) {
 	}
 }
 
-func TestBudgetWindowScaleStepsDownDeterministically(t *testing.T) {
-	// A 240 MiB budget divides evenly by every connection window, so each
-	// boundary sits on an exact connection count:
-	//   scale 4 (16 MiB) fits 15 connections, scale 3 (8 MiB) fits 30,
-	//   scale 2 (4 MiB) fits 60, scale 1 (2 MiB) fits 120.
+func TestBudgetWindowScaleStepsDownWithTheCreditLeft(t *testing.T) {
 	tests := []struct {
-		name   string
-		active uint64
-		want   uint32
+		name      string
+		available uint64
+		want      uint32
 	}{
-		{name: "first connection", active: 0, want: 4},
-		{name: "last that still fits at 16 MiB", active: 14, want: 4},
-		{name: "16 MiB stops fitting", active: 15, want: 3},
-		{name: "last that still fits at 8 MiB", active: 29, want: 3},
-		{name: "8 MiB stops fitting", active: 30, want: 2},
-		{name: "last that still fits at 4 MiB", active: 59, want: 2},
-		{name: "4 MiB stops fitting", active: 60, want: 1},
-		{name: "last that still fits at 2 MiB", active: 119, want: 1},
-		{name: "2 MiB stops fitting", active: 120, want: 0},
-		{name: "budget long gone", active: 100_000, want: 0},
+		{name: "the whole budget", available: testBudget240MB, want: 4},
+		{name: "exactly the widest window", available: 16 * mib, want: 4},
+		{name: "a byte short of the widest window", available: 16*mib - 1, want: 3},
+		{name: "exactly an 8 MiB window", available: 8 * mib, want: 3},
+		{name: "a byte short of 8 MiB", available: 8*mib - 1, want: 2},
+		{name: "one legacy window", available: uint64(InitialConnectionWindow), want: 0},
+		{name: "under the legacy window", available: uint64(InitialConnectionWindow) - 1, want: 0},
+		{name: "nothing left", available: 0, want: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := budgetWindowScale(testBudget240MB, test.active); got != test.want {
-				t.Fatalf("budgetWindowScale(240MiB, %d) = %d, want %d", test.active, got, test.want)
+			if got := budgetWindowScale(test.available); got != test.want {
+				t.Fatalf("budgetWindowScale(%d) = %d, want %d", test.available, got, test.want)
 			}
 		})
-	}
-}
-
-func TestBudgetWindowScaleHonoursTheInequalityAtZeroConnections(t *testing.T) {
-	// Even with no connection established the connection being negotiated has
-	// to fit, so a budget under one connection window yields a lower scale.
-	tests := []struct {
-		budget uint64
-		want   uint32
-	}{
-		{budget: 16 * mib, want: 4},
-		{budget: 16*mib - 1, want: 3},
-		{budget: uint64(InitialConnectionWindow), want: 0},
-		{budget: uint64(InitialConnectionWindow) - 1, want: 0},
-		{budget: 0, want: 0},
-	}
-	for _, test := range tests {
-		if got := budgetWindowScale(test.budget, 0); got != test.want {
-			t.Fatalf("budgetWindowScale(%d, 0) = %d, want %d", test.budget, got, test.want)
-		}
-	}
-	// The +1 must not wrap at the extreme.
-	if got := budgetWindowScale(testBudget240MB, ^uint64(0)); got != 0 {
-		t.Fatalf("budgetWindowScale at max active = %d, want 0", got)
 	}
 }
 
@@ -151,9 +121,19 @@ func TestBudgetCeilingTakesTheLowerOfPressureAndBudget(t *testing.T) {
 	if !known || budget != 240*mib {
 		t.Fatalf("budget = %d (known %v), want %d", budget, known, 240*mib)
 	}
-	// Budget is the tighter of the two.
-	if got := budgetCeiling(governor, MaxWindowScale, 30); got != 2 {
+	// An untouched budget covers the widest window.
+	if got := budgetCeiling(governor, MaxWindowScale, 0); got != MaxWindowScale {
+		t.Fatalf("ceiling on an untouched budget = %d, want %d", got, MaxWindowScale)
+	}
+	// Other connections hold all but 6 MiB: the budget is the tighter of the two.
+	governor.committedWindow.Store(234 * mib)
+	if got := budgetCeiling(governor, MaxWindowScale, 0); got != 2 {
 		t.Fatalf("ceiling = %d, want 2", got)
+	}
+	// A connection asking about credit it holds itself gets it counted back,
+	// so growing is measured against its own total rather than the delta.
+	if got := budgetCeiling(governor, MaxWindowScale, 234*mib); got != MaxWindowScale {
+		t.Fatalf("ceiling for the holder = %d, want %d", got, MaxWindowScale)
 	}
 	// Pressure is the tighter of the two.
 	if got := budgetCeiling(governor, 0, 0); got != 0 {
@@ -164,7 +144,7 @@ func TestBudgetCeilingTakesTheLowerOfPressureAndBudget(t *testing.T) {
 // newBudgetedServer returns an auto-policy server whose governor sees a 960 MiB
 // host with a healthy 240 MiB budget and no CPU/memory pressure at all, so any
 // ceiling movement is the budget clamp's doing.
-func newBudgetedServer(t *testing.T, active uint64) *Server {
+func newBudgetedServer(t *testing.T, committed uint64) *Server {
 	t.Helper()
 	server := newArtXTestServer(t)
 	server.flowControlAuto = true
@@ -177,30 +157,32 @@ func newBudgetedServer(t *testing.T, active uint64) *Server {
 	if got := governor.Ceiling(); got != MaxWindowScale {
 		t.Fatalf("pressure rung = %d, want %d on an idle host", got, MaxWindowScale)
 	}
+	governor.committedWindow.Store(committed)
 	server.SetPressureGovernor(governor)
-	server.stats.add(runtimeCounterActiveConnections, int64(active))
 	return server
 }
 
-func TestNegotiationCeilingClampsOnConcurrency(t *testing.T) {
+// The clamp follows the credit connections actually hold, not how many of them
+// there are: a host carrying hundreds of idle connections still has its budget,
+// and a handful of saturated ones can spend it.
+func TestCeilingClampsOnCommittedCredit(t *testing.T) {
 	tests := []struct {
-		name string
-		// active includes the connection being negotiated, the way Process
-		// counts it before the handshake reaches negotiation.
-		active uint64
-		want   uint32
+		name      string
+		committed uint64
+		want      uint32
 	}{
-		{name: "few users get the full scale", active: 1, want: 4},
-		{name: "last connection at 16 MiB", active: 15, want: 4},
-		{name: "16 MiB stops fitting", active: 16, want: 3},
-		{name: "many users step down", active: 61, want: 1},
-		{name: "hundred users", active: 100, want: 1},
+		{name: "untouched budget", committed: 0, want: 4},
+		{name: "the widest window still fits", committed: 224 * mib, want: 4},
+		{name: "16 MiB stops fitting", committed: 225 * mib, want: 3},
+		{name: "down to the legacy window", committed: 238 * mib, want: 1},
+		{name: "budget spent", committed: 240 * mib, want: 0},
+		{name: "overspent", committed: 900 * mib, want: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := newBudgetedServer(t, test.active)
-			if got := server.negotiationCeiling(); got != test.want {
-				t.Fatalf("negotiationCeiling() with %d active = %d, want %d", test.active, got, test.want)
+			server := newBudgetedServer(t, test.committed)
+			if got := server.ceilingFor(0); got != test.want {
+				t.Fatalf("ceilingFor(0) with %d committed = %d, want %d", test.committed, got, test.want)
 			}
 		})
 	}
@@ -222,8 +204,8 @@ func TestNegotiationSucceedsWithAnExhaustedBudget(t *testing.T) {
 	server.SetPressureGovernor(governor)
 	server.stats.add(runtimeCounterActiveConnections, 1)
 
-	if got := server.negotiationCeiling(); got != 0 {
-		t.Fatalf("negotiationCeiling() = %d, want 0", got)
+	if got := server.ceilingFor(0); got != 0 {
+		t.Fatalf("ceilingFor(0) = %d, want 0", got)
 	}
 	// The connection is still served: negotiation returns the legacy window
 	// rather than failing or refusing anything.
@@ -250,15 +232,15 @@ func TestReportedCeilingReflectsTheBudgetNotOnlyPressure(t *testing.T) {
 		t.Fatalf("idle ceiling = %d, want %d", got, uint64(MaxWindowScale))
 	}
 
-	// Sixty live connections at an unchanged, idle pressure rung: only the
-	// budget can explain the gauge stepping down to 1.
-	server.stats.add(runtimeCounterActiveConnections, 60)
+	// Connections holding all but 2 MiB of the budget, at an unchanged and idle
+	// pressure rung: only the budget can explain the gauge stepping down to 1.
+	server.governor().committedWindow.Store(238 * mib)
 	publishPressureCeilings()
 	if got := server.governor().Ceiling(); got != MaxWindowScale {
 		t.Fatalf("pressure rung moved to %d; the gauge would not isolate the budget", got)
 	}
 	if got := RuntimeStatsFromManager(manager, "artx-budgeted").FlowControlPressureCeiling; got != 1 {
-		t.Fatalf("ceiling with 60 live connections = %d, want 1", got)
+		t.Fatalf("ceiling with the budget nearly spent = %d, want 1", got)
 	}
 }
 
@@ -373,15 +355,99 @@ func TestSetSharedWindowBudgetPolicyAppliesBeforeAndAfterSamples(t *testing.T) {
 }
 
 func TestBudgetWindowScaleFollowsThePolicy(t *testing.T) {
-	// 240 MiB of budget fits 15 connections at 16 MiB, the widest window.
-	if got := budgetWindowScale(testBudget240MB, 14); got != MaxWindowScale {
-		t.Fatalf("scale at 15 connections = %d, want %d", got, MaxWindowScale)
+	// 240 MiB of budget covers the widest window until all but 16 MiB is held.
+	if got := budgetWindowScale(testBudget240MB - 224*mib); got != MaxWindowScale {
+		t.Fatalf("scale with 16 MiB left = %d, want %d", got, MaxWindowScale)
 	}
-	if got := budgetWindowScale(testBudget240MB, 15); got != 3 {
-		t.Fatalf("scale at 16 connections = %d, want 3", got)
+	if got := budgetWindowScale(testBudget240MB - 225*mib); got != 3 {
+		t.Fatalf("scale with 15 MiB left = %d, want 3", got)
 	}
-	// Doubling the budget doubles the connection count that keeps scale 4.
-	if got := budgetWindowScale(2*testBudget240MB, 29); got != MaxWindowScale {
-		t.Fatalf("scale at 30 connections on a doubled budget = %d, want %d", got, MaxWindowScale)
+	// Doubling the budget doubles the credit that can be held before the
+	// widest window stops fitting.
+	if got := budgetWindowScale(2*testBudget240MB - 464*mib); got != MaxWindowScale {
+		t.Fatalf("scale with 16 MiB left on a doubled budget = %d, want %d", got, MaxWindowScale)
 	}
+}
+
+// budgetedGovernor is an otherwise unpressured governor on a 960 MiB host, so
+// its 240 MiB window budget is the only thing a ledger can run out of.
+func budgetedGovernor(t *testing.T) *PressureGovernor {
+	t.Helper()
+	governor := NewPressureGovernor(PressureGovernorConfig{})
+	governor.Observe(memorySample(960*mib, 900*mib), time.Unix(0, 0))
+	if budget, known := governor.WindowBudgetBytes(); !known || budget != testBudget240MB {
+		t.Fatalf("budget = %d (known %v), want %d", budget, known, testBudget240MB)
+	}
+	return governor
+}
+
+// The opening window is committed without asking, because a connection is never
+// refused for want of budget; only the rungs above it are negotiable.
+func TestLedgerCommitsTheOpeningWindowUnconditionally(t *testing.T) {
+	governor := budgetedGovernor(t)
+	governor.committedWindow.Store(testBudget240MB)
+
+	ledger := newWindowCreditLedger(governor)
+	ledger.commit(uint64(InitialConnectionWindow))
+
+	if got := ledger.held(); got != uint64(InitialConnectionWindow) {
+		t.Fatalf("held = %d, want %d", got, InitialConnectionWindow)
+	}
+	if got := governor.CommittedWindowBytes(); got != testBudget240MB+uint64(InitialConnectionWindow) {
+		t.Fatalf("committed = %d, want %d", got, testBudget240MB+uint64(InitialConnectionWindow))
+	}
+	if ledger.reserve(uint64(InitialConnectionWindow)) {
+		t.Fatal("a rung was granted on an overspent budget")
+	}
+}
+
+func TestLedgerDeclinesARungTheBudgetCannotCover(t *testing.T) {
+	governor := budgetedGovernor(t)
+	// Other connections hold all but 3 MiB of the budget.
+	governor.committedWindow.Store(testBudget240MB - 3*mib)
+
+	ledger := newWindowCreditLedger(governor)
+	ledger.commit(uint64(InitialConnectionWindow))
+	if !ledger.reserve(2 * mib) {
+		t.Fatal("a rung the budget covers was declined")
+	}
+	if ledger.reserve(4 * mib) {
+		t.Fatal("a rung past the budget was granted")
+	}
+	if got := ledger.held(); got != uint64(InitialConnectionWindow)+2*mib {
+		t.Fatalf("held = %d, want %d", got, uint64(InitialConnectionWindow)+2*mib)
+	}
+}
+
+func TestLedgerReleasesEverythingItHolds(t *testing.T) {
+	governor := budgetedGovernor(t)
+	ledger := newWindowCreditLedger(governor)
+	ledger.commit(uint64(InitialConnectionWindow))
+	if !ledger.reserve(2 * mib) {
+		t.Fatal("a rung the budget covers was declined")
+	}
+
+	ledger.release()
+	if got := governor.CommittedWindowBytes(); got != 0 {
+		t.Fatalf("committed after release = %d, want 0", got)
+	}
+	// Releasing twice must not hand the budget credit it never lent.
+	ledger.release()
+	if got := governor.CommittedWindowBytes(); got != 0 {
+		t.Fatalf("committed after a second release = %d, want 0", got)
+	}
+}
+
+// Without a governor there is no budget to spend, so every rung fits and the
+// pacer is clamped by pressure and the negotiated ceiling alone.
+func TestLedgerWithoutAGovernorAlwaysFits(t *testing.T) {
+	ledger := newWindowCreditLedger(nil)
+	ledger.commit(uint64(InitialConnectionWindow))
+	if !ledger.reserve(16 * mib) {
+		t.Fatal("a rung was declined without a governor")
+	}
+	if got := ledger.held(); got != 0 {
+		t.Fatalf("held = %d, want 0 without a governor", got)
+	}
+	ledger.release()
 }

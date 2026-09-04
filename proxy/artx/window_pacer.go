@@ -26,8 +26,10 @@ type windowPacer struct {
 	deadline  time.Time
 	interval  time.Duration
 	ceiling   func() uint32
-	grow      func(streamDelta, connectionDelta uint32) error
-	now       func() time.Time
+	// grow reports whether the rung was actually taken. The uplink declines
+	// when the host's window budget cannot cover it.
+	grow func(streamDelta, connectionDelta uint32) (bool, error)
+	now  func() time.Time
 }
 
 // windowPacing carries what a connection needs to build its pacers once its
@@ -36,9 +38,13 @@ type windowPacer struct {
 type windowPacing struct {
 	rtt     autoRTTSample
 	ceiling func() uint32
+	// ledger is this connection's share of the host's window budget. Only the
+	// uplink spends it: downlink credit is memory the client commits, not this
+	// host.
+	ledger *windowCreditLedger
 }
 
-func newWindowPacer(rtt autoRTTSample, ceiling func() uint32, grow func(streamDelta, connectionDelta uint32) error) *windowPacer {
+func newWindowPacer(rtt autoRTTSample, ceiling func() uint32, grow func(streamDelta, connectionDelta uint32) (bool, error)) *windowPacer {
 	return &windowPacer{
 		interval: windowGrowthInterval(rtt),
 		ceiling:  ceiling,
@@ -54,9 +60,9 @@ func newDownlinkPacer(pacing *windowPacing, window *sendWindow) *windowPacer {
 	if pacing == nil {
 		return nil
 	}
-	return newWindowPacer(pacing.rtt, pacing.ceiling, func(streamDelta, connectionDelta uint32) error {
+	return newWindowPacer(pacing.rtt, pacing.ceiling, func(streamDelta, connectionDelta uint32) (bool, error) {
 		window.grow(streamDelta, connectionDelta)
-		return nil
+		return true, nil
 	})
 }
 
@@ -67,8 +73,15 @@ func newUplinkPacer(pacing *windowPacing, window *sendWindow, writer *lockedFram
 	if pacing == nil {
 		return nil
 	}
-	return newWindowPacer(pacing.rtt, pacing.ceiling, func(streamDelta, connectionDelta uint32) error {
-		return grantReceiveCredit(writer, window, streamDelta, connectionDelta)
+	ledger := pacing.ledger
+	return newWindowPacer(pacing.rtt, pacing.ceiling, func(streamDelta, connectionDelta uint32) (bool, error) {
+		// The budget is charged the connection window, the cost unit that
+		// bounds a connection's total in-flight bytes. A rung that does not fit
+		// is not taken, and the next busy interval asks again.
+		if !ledger.reserve(uint64(connectionDelta)) {
+			return false, nil
+		}
+		return true, grantReceiveCredit(writer, window, streamDelta, connectionDelta)
 	})
 }
 
@@ -111,10 +124,15 @@ func (pacer *windowPacer) observe(delivered int) error {
 		pacer.mu.Unlock()
 		return nil
 	}
-	pacer.scale = scale + 1
-	pacer.mu.Unlock()
 	// One rung doubles the window, so the delta equals the window it replaces.
-	return pacer.grow(InitialStreamWindow<<scale, InitialConnectionWindow<<scale)
+	// The lock is held across the grant so the scale advances only once the
+	// window behind it really did, and never twice for one rung.
+	granted, err := pacer.grow(InitialStreamWindow<<scale, InitialConnectionWindow<<scale)
+	if granted {
+		pacer.scale = scale + 1
+	}
+	pacer.mu.Unlock()
+	return err
 }
 
 func (pacer *windowPacer) Scale() uint32 {

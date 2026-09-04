@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/bits"
 	"strings"
+	"sync/atomic"
 )
 
 // The window budget is the instantaneous half of ArtX flow-control damping.
@@ -160,41 +161,127 @@ func (governor *PressureGovernor) WindowBudgetPolicy() WindowBudgetPolicy {
 	return policy
 }
 
-// budgetWindowScale is the largest scale in [0, MaxWindowScale] for which every
-// connection — the activeConnections already established plus the one being
-// negotiated — still fits inside budgetBytes:
+// budgetWindowScale is the largest scale in [0, MaxWindowScale] whose
+// connection window fits in availableBytes:
 //
-//	(activeConnections + 1) * (InitialConnectionWindow << scale) <= budgetBytes
+//	(InitialConnectionWindow << scale) <= availableBytes
 //
-// The connection window, not the stream window, is the per-connection cost
-// unit because it bounds a connection's total in-flight bytes across all of
-// its streams.
+// The connection window, not the stream window, is the cost unit because it
+// bounds a connection's total in-flight bytes across all of its streams.
 //
 // When not even the legacy window fits, the result is 0: the budget clamps the
 // window, it never rejects the connection.
-func budgetWindowScale(budgetBytes uint64, activeConnections uint64) uint32 {
-	if budgetBytes == 0 || activeConnections == ^uint64(0) {
-		return 0
-	}
-	// Dividing instead of multiplying keeps the comparison overflow-free:
-	// for a positive integer x, connections*x <= budget iff x <= budget/connections.
-	perConnection := budgetBytes / (activeConnections + 1)
+func budgetWindowScale(availableBytes uint64) uint32 {
 	scale := uint32(0)
-	for scale < MaxWindowScale && uint64(InitialConnectionWindow)<<(scale+1) <= perConnection {
+	for scale < MaxWindowScale && uint64(InitialConnectionWindow)<<(scale+1) <= availableBytes {
 		scale++
 	}
 	return scale
 }
 
-// budgetCeiling intersects a pressure ceiling with the budget clamp for a
-// connection that is not yet counted in activeConnections. An unknown budget
-// leaves the pressure ceiling untouched.
-func budgetCeiling(governor *PressureGovernor, pressureCeiling uint32, activeConnections uint64) uint32 {
+// availableWindowCredit is the total credit a connection already holding
+// ownCredit bytes may hold: the whole budget, less what every *other*
+// connection holds. The bool reports whether the budget is known at all.
+//
+// Accounting the credit actually granted, rather than counting connections and
+// assuming each will take the widest window, is what lets a host carry many
+// idle connections and a few busy ones at the same time: an idle connection
+// holds the compatibility window and costs the budget almost nothing.
+func (governor *PressureGovernor) availableWindowCredit(ownCredit uint64) (uint64, bool) {
 	budget, known := governor.WindowBudgetBytes()
+	if !known {
+		return 0, false
+	}
+	held := governor.committedWindow.Load()
+	return saturatingSub(budget, saturatingSub(held, ownCredit)), true
+}
+
+// CommittedWindowBytes is the receive-window credit connections currently hold.
+func (governor *PressureGovernor) CommittedWindowBytes() uint64 {
+	if governor == nil {
+		return 0
+	}
+	return governor.committedWindow.Load()
+}
+
+func saturatingSub(value, delta uint64) uint64 {
+	if delta >= value {
+		return 0
+	}
+	return value - delta
+}
+
+// budgetCeiling intersects a pressure ceiling with the budget clamp, for a
+// connection currently holding ownCredit bytes of receive-window credit. An
+// unknown budget leaves the pressure ceiling untouched.
+func budgetCeiling(governor *PressureGovernor, pressureCeiling uint32, ownCredit uint64) uint32 {
+	available, known := governor.availableWindowCredit(ownCredit)
 	if !known {
 		return pressureCeiling
 	}
-	return min(pressureCeiling, budgetWindowScale(budget, activeConnections))
+	return min(pressureCeiling, budgetWindowScale(available))
+}
+
+// windowCreditLedger is one connection's share of the budget. commit records
+// credit the connection is entitled to regardless of the budget — a connection
+// is never refused — while reserve asks whether one more rung fits. Release
+// hands everything back when the connection ends.
+//
+// A reserve is not atomic against other connections, so a burst of simultaneous
+// grants can overshoot the budget by a rung each. The next decision sees the
+// real total and stops, which is the accuracy this clamp needs: it is a damper,
+// not an allocator.
+type windowCreditLedger struct {
+	governor *PressureGovernor
+	credit   atomic.Uint64
+}
+
+func newWindowCreditLedger(governor *PressureGovernor) *windowCreditLedger {
+	return &windowCreditLedger{governor: governor}
+}
+
+func (ledger *windowCreditLedger) commit(bytes uint64) {
+	if ledger == nil || ledger.governor == nil || bytes == 0 {
+		return
+	}
+	ledger.credit.Add(bytes)
+	ledger.governor.committedWindow.Add(bytes)
+}
+
+// reserve reports whether bytes more credit fits in the budget, and books it
+// when it does. An unknown budget always fits.
+func (ledger *windowCreditLedger) reserve(bytes uint64) bool {
+	if ledger == nil || ledger.governor == nil {
+		return true
+	}
+	held := ledger.credit.Load()
+	available, known := ledger.governor.availableWindowCredit(held)
+	if known && held+bytes > available {
+		return false
+	}
+	ledger.commit(bytes)
+	return true
+}
+
+func (ledger *windowCreditLedger) held() uint64 {
+	if ledger == nil {
+		return 0
+	}
+	return ledger.credit.Load()
+}
+
+func (ledger *windowCreditLedger) release() {
+	if ledger == nil || ledger.governor == nil {
+		return
+	}
+	held := ledger.credit.Swap(0)
+	if held == 0 {
+		return
+	}
+	// Add of the two's-complement negation: the counter only ever holds what
+	// live ledgers hold, so it cannot go below zero unless a ledger is released
+	// twice, which Swap already prevents.
+	ledger.governor.committedWindow.Add(^(held - 1))
 }
 
 // percentOf is value * percent / 100 computed in 128 bits, so a large memory

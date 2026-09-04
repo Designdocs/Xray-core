@@ -130,7 +130,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	if instance := core.FromContext(ctx); instance != nil {
 		server.stats.manager, _ = instance.GetFeature(featurestats.ManagerType()).(featurestats.Manager)
 	}
-	server.stats.ceilingSource = server.pressureCeiling
+	server.stats.ceilingSource = func() uint32 { return server.ceilingFor(0) }
 	if config.Fallback != nil && config.Fallback.Enabled {
 		fallback, err := NewHTTPFallback(config.Fallback.Origin)
 		if err != nil {
@@ -339,7 +339,7 @@ func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connecti
 		scale := negotiateWindowScale(settings, maxWindowScale, s.wireVersion)
 		return streamWindowPlan{scale: scale, staticCeiling: scale}
 	}
-	ceiling := s.negotiationCeiling()
+	ceiling := s.ceilingFor(0)
 	s.stats.set(runtimeCounterFlowControlPressureCeiling, uint64(ceiling))
 	var rtt autoRTTSample
 	if s.sampleRTT != nil {
@@ -364,10 +364,16 @@ func (s *Server) windowPacing(plan streamWindowPlan) *windowPacing {
 	if !plan.auto {
 		return nil
 	}
+	ledger := newWindowCreditLedger(s.governor())
 	return &windowPacing{
-		rtt: plan.rtt,
+		rtt:    plan.rtt,
+		ledger: ledger,
 		ceiling: func() uint32 {
-			return min(plan.staticCeiling, s.pressureCeiling())
+			// The connection's own credit is added back before the budget is
+			// consulted, so growing from one rung to the next is measured
+			// against what the connection may hold in total rather than
+			// against the delta on top of what it already holds.
+			return min(plan.staticCeiling, s.ceilingFor(ledger.held()))
 		},
 	}
 }
@@ -384,26 +390,15 @@ func (s *Server) governor() *PressureGovernor {
 	return governor
 }
 
-// pressureCeiling is the effective window scale ceiling for the next
-// connection to arrive: the sustained-load rung intersected with the
-// instantaneous memory budget clamp. It is what the reported gauge shows,
-// because an operator needs to see the ceiling that actually applies rather
-// than only the pressure half of it.
-func (s *Server) pressureCeiling() uint32 {
+// ceilingFor is the effective window scale ceiling for a connection currently
+// holding ownCredit bytes of receive-window credit: the sustained-load rung
+// intersected with the instantaneous memory budget clamp. Called with zero it
+// answers for a connection that holds nothing yet, which is both what a
+// negotiation asks and what the reported gauge shows — an operator needs to see
+// the ceiling that actually applies rather than only the pressure half of it.
+func (s *Server) ceilingFor(ownCredit uint64) uint32 {
 	governor := s.governor()
-	return budgetCeiling(governor, governor.Ceiling(), s.stats.activeConnections.Load())
-}
-
-// negotiationCeiling is pressureCeiling for a connection Process has already
-// counted into the active gauge, so the budget's own "+1 for the connection
-// being negotiated" is not charged twice.
-func (s *Server) negotiationCeiling() uint32 {
-	active := s.stats.activeConnections.Load()
-	if active > 0 {
-		active--
-	}
-	governor := s.governor()
-	return budgetCeiling(governor, governor.Ceiling(), active)
+	return budgetCeiling(governor, governor.Ceiling(), ownCredit)
 }
 
 func (s *Server) targetRateFor(user *protocol.MemoryUser) uint64 {
@@ -774,6 +769,13 @@ func relaySingleStreamFramesPaced(ctx context.Context, connection io.ReadWriteCl
 	}
 	sendWindow := newSendWindowWithLimits(openingLimits)
 	receiveWindow := newSendWindowWithLimits(openingLimits)
+	if pacing != nil {
+		// The opening window is charged to the budget without asking: a
+		// connection is never refused, and it is going to hold this much
+		// whatever the budget says.
+		pacing.ledger.commit(uint64(openingLimits.connection))
+		defer pacing.ledger.release()
+	}
 	downlinkPacer := newDownlinkPacer(pacing, sendWindow)
 	uplinkPacer := newUplinkPacer(pacing, receiveWindow, writer)
 	clientFinished := make(chan struct{}, 1)
