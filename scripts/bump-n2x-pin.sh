@@ -48,8 +48,11 @@ info "building N2X"
 env "${N2X_BUILD_ENV[@]}" go build -tags "$N2X_BUILD_TAGS" ./... \
   || fail "N2X build failed. An upstream API change is the usual cause — fix it the way upstream did rather than reverting the pin."
 
+# -p 1 is not optional: N2X's suites bind fixed ports and watch the filesystem,
+# so running packages in parallel fails on port contention and fsnotify rather
+# than on anything the pin changed.
 info "testing N2X"
-env "${N2X_BUILD_ENV[@]}" go test -tags "$N2X_BUILD_TAGS" ./... || fail "N2X tests failed."
+env "${N2X_BUILD_ENV[@]}" go test -p 1 -tags "$N2X_BUILD_TAGS" ./... || fail "N2X tests failed."
 
 # Name the commit the nodes will actually run. Upstream publishes no tags and
 # a pseudo-version is not something anyone recognises six months later, so
