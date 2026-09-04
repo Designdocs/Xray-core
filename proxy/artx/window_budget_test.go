@@ -228,7 +228,7 @@ func TestNegotiationSucceedsWithAnExhaustedBudget(t *testing.T) {
 	// The connection is still served: negotiation returns the legacy window
 	// rather than failing or refusing anything.
 	settings := map[uint16]uint32{SettingMaxWindowScale: MaxWindowScale}
-	if got := server.negotiateStreamWindowScale(settings, nil, nil); got != 0 {
+	if got := server.negotiateStreamWindowScale(settings, nil, nil).scale; got != 0 {
 		t.Fatalf("negotiateStreamWindowScale() = %d, want 0", got)
 	}
 	if got := server.Stats().FlowControlPressureCeiling; got != 0 {

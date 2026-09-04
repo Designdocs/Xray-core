@@ -277,15 +277,15 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 	}
 	switch openFrame.Type {
 	case FrameTCPSyn:
-		effectiveScale := s.negotiateStreamWindowScale(settings, connection, user)
-		limits := flowControlLimitsForScale(effectiveScale)
+		plan := s.negotiateStreamWindowScale(settings, connection, user)
+		limits := flowControlLimitsForScale(plan.scale)
 		if err := writeExpandedReceiveCredit(writer, limits, true); err != nil {
 			return fmt.Errorf("artx: expand receive window: %w", err)
 		}
-		if effectiveScale != 0 {
+		if plan.scale != 0 {
 			s.stats.add(runtimeCounterFlowControlNegotiated, 1)
 		}
-		s.stats.add(flowControlScaleCounter(effectiveScale), 1)
+		s.stats.add(flowControlScaleCounter(plan.scale), 1)
 		destination, err := DecodeTCPDestination(openFrame.Payload)
 		if err != nil {
 			return err
@@ -295,7 +295,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 			return fmt.Errorf("artx: dispatch: %w", err)
 		}
 		emitR0ServerEvent(r0Hook, r0ServerEventDispatchReturn, 1)
-		return relaySingleStreamWithLimits(ctx, tlsConnection, writer, observeR0ServerLink(link, r0Hook), limits)
+		return relaySingleStreamPaced(ctx, tlsConnection, writer, observeR0ServerLink(link, r0Hook), limits, s.downlinkPacer(plan))
 	case FrameUDPAssoc:
 		if !s.udpEnabled {
 			return errors.New("artx: UDP is disabled")
@@ -314,10 +314,25 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 // The legacy policy just clamps the client offer to the node maximum; the auto
 // policy additionally sizes the window from the connection's bandwidth-delay
 // product and the current effective ceiling.
-func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connection net.Conn, user *protocol.MemoryUser) uint32 {
+// streamWindowPlan is what negotiation produces: the scale the connection
+// starts from, the ceiling it may grow to while it stays busy, and the RTT
+// sample that sets the growth timescale.
+type streamWindowPlan struct {
+	scale uint32
+	// staticCeiling is the part of the ceiling fixed for this connection: the
+	// client offer, the node maximum and the bandwidth-delay product. The host
+	// ceiling is applied on top and re-applied on every growth decision,
+	// because unlike these it moves while the connection is alive.
+	staticCeiling uint32
+	rtt           autoRTTSample
+	auto          bool
+}
+
+func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connection net.Conn, user *protocol.MemoryUser) streamWindowPlan {
 	auto, maxWindowScale := s.flowControlPolicy()
 	if !auto {
-		return negotiateWindowScale(settings, maxWindowScale, s.wireVersion)
+		scale := negotiateWindowScale(settings, maxWindowScale, s.wireVersion)
+		return streamWindowPlan{scale: scale, staticCeiling: scale}
 	}
 	ceiling := s.negotiationCeiling()
 	s.stats.set(runtimeCounterFlowControlPressureCeiling, uint64(ceiling))
@@ -325,11 +340,28 @@ func (s *Server) negotiateStreamWindowScale(settings map[uint16]uint32, connecti
 	if s.sampleRTT != nil {
 		rtt = s.sampleRTT(connection)
 	}
-	scale, fellBack := negotiateAutoWindowScale(settings, maxWindowScale, s.wireVersion, rtt, s.targetRateFor(user), ceiling)
+	staticCeiling, fellBack := negotiateAutoWindowScale(settings, maxWindowScale, s.wireVersion, rtt, s.targetRateFor(user), MaxWindowScale)
 	if fellBack {
 		s.stats.add(runtimeCounterFlowControlAutoFallback, 1)
 	}
-	return scale
+	return streamWindowPlan{
+		scale:         min(staticCeiling, ceiling),
+		staticCeiling: staticCeiling,
+		rtt:           rtt,
+		auto:          true,
+	}
+}
+
+// downlinkPacer builds the grow-on-demand pacer for a connection. Manual flow
+// control gets nil: an operator who pinned a scale asked for that window, not
+// for a ramp.
+func (s *Server) downlinkPacer(plan streamWindowPlan) *windowPacer {
+	if !plan.auto {
+		return nil
+	}
+	return newWindowPacer(plan.rtt, func() uint32 {
+		return min(plan.staticCeiling, s.pressureCeiling())
+	})
 }
 
 // governor resolves the pressure governor this inbound reads, falling back to
@@ -642,6 +674,25 @@ func (window *sendWindow) waitConsume(ctx context.Context, amount int) error {
 	}
 }
 
+// grow raises the live credit and the ceiling by the same amount.
+//
+// Raising them together is what makes growth safe: the invariant
+// credit+in-flight == max is preserved, so a replenish the peer already had in
+// flight still fits when it lands instead of tripping the overflow guard.
+func (window *sendWindow) grow(streamDelta, connectionDelta uint32) {
+	if streamDelta == 0 && connectionDelta == 0 {
+		return
+	}
+	window.mu.Lock()
+	window.stream += streamDelta
+	window.maxStream += streamDelta
+	window.connection += connectionDelta
+	window.maxConn += connectionDelta
+	close(window.changed)
+	window.changed = make(chan struct{})
+	window.mu.Unlock()
+}
+
 func (window *sendWindow) update(streamID, increment uint32) error {
 	if increment == 0 {
 		return errors.New("artx: zero WINDOW_UPDATE")
@@ -686,9 +737,15 @@ func relaySingleStream(ctx context.Context, connection io.ReadWriteCloser, write
 }
 
 func relaySingleStreamWithLimits(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, limits flowControlLimits) error {
-	return relaySingleStreamFramesWithLimits(ctx, connection, writer, link, func() (Frame, error) {
+	return relaySingleStreamPaced(ctx, connection, writer, link, limits, nil)
+}
+
+// relaySingleStreamPaced relays one stream, optionally growing the downlink
+// window on demand instead of committing the negotiated window up front.
+func relaySingleStreamPaced(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, limits flowControlLimits, pacer *windowPacer) error {
+	return relaySingleStreamFramesPaced(ctx, connection, writer, link, func() (Frame, error) {
 		return ReadFrame(connection)
-	}, limits)
+	}, limits, pacer)
 }
 
 func relaySingleStreamFrames(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, readFrame func() (Frame, error)) error {
@@ -696,7 +753,20 @@ func relaySingleStreamFrames(ctx context.Context, connection io.ReadWriteCloser,
 }
 
 func relaySingleStreamFramesWithLimits(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, readFrame func() (Frame, error), limits flowControlLimits) error {
-	sendWindow := newSendWindowWithLimits(limits)
+	return relaySingleStreamFramesPaced(ctx, connection, writer, link, readFrame, limits, nil)
+}
+
+func relaySingleStreamFramesPaced(ctx context.Context, connection io.ReadWriteCloser, writer *lockedFrameWriter, link *transport.Link, readFrame func() (Frame, error), limits flowControlLimits, pacer *windowPacer) error {
+	// With a pacer the negotiated limits describe the ceiling, not the opening
+	// balance: the downlink starts at the compatibility window and the pacer
+	// grows it while the client keeps it busy. The uplink bookkeeping still
+	// starts at the negotiated limits, because the client was already handed
+	// that credit during the handshake.
+	downlinkLimits := limits
+	if pacer != nil {
+		downlinkLimits = legacyFlowControlLimits()
+	}
+	sendWindow := newSendWindowWithLimits(downlinkLimits)
 	receiveWindow := newSendWindowWithLimits(limits)
 	clientFinished := make(chan struct{}, 1)
 	results := make(chan relayResult, 2)
@@ -704,7 +774,7 @@ func relaySingleStreamFramesWithLimits(ctx context.Context, connection io.ReadWr
 		results <- relayResult{direction: relayUplinkDirection, err: relayUplinkFrames(connection, writer, link, sendWindow, receiveWindow, clientFinished, readFrame)}
 	}()
 	go func() {
-		results <- relayResult{direction: relayDownlinkDirection, err: relayDownlink(ctx, writer, link, sendWindow)}
+		results <- relayResult{direction: relayDownlinkDirection, err: relayDownlink(ctx, writer, link, sendWindow, pacer)}
 	}()
 
 	clientHalfClosed := false
@@ -1008,7 +1078,7 @@ func replenishReceiveWindow(writer *lockedFrameWriter, window *sendWindow, amoun
 	)
 }
 
-func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transport.Link, window *sendWindow) error {
+func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transport.Link, window *sendWindow, pacer *windowPacer) error {
 	for {
 		buffers, readErr := link.Reader.ReadMultiBuffer()
 		for !buffers.IsEmpty() {
@@ -1025,6 +1095,7 @@ func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transpo
 				buf.ReleaseMulti(buffers)
 				return err
 			}
+			pacer.observe(window, len(payload))
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {

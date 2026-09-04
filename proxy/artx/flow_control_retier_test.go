@@ -14,12 +14,12 @@ func TestSetFlowControlRetiersTheNextNegotiation(t *testing.T) {
 	server.SetFlowControl(false, 0)
 
 	settings := map[uint16]uint32{SettingMaxWindowScale: MaxWindowScale}
-	if got := server.negotiateStreamWindowScale(settings, nil, nil); got != 0 {
+	if got := server.negotiateStreamWindowScale(settings, nil, nil).scale; got != 0 {
 		t.Fatalf("legacy tier negotiated scale %d, want 0", got)
 	}
 
 	server.SetFlowControl(false, 3)
-	if got := server.negotiateStreamWindowScale(settings, nil, nil); got != 3 {
+	if got := server.negotiateStreamWindowScale(settings, nil, nil).scale; got != 3 {
 		t.Fatalf("after retier negotiated scale %d, want 3", got)
 	}
 
