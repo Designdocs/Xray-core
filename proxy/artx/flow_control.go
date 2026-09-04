@@ -57,3 +57,26 @@ func writeExpandedReceiveCredit(writer *lockedFrameWriter, limits flowControlLim
 		streamUpdate,
 	)
 }
+
+// grantReceiveCredit hands the client one more rung of uplink credit. The local
+// bookkeeping moves first so a replenish racing this grant is measured against
+// the larger window; the client cannot overrun the grant either way, because
+// credit only ever counts up.
+func grantReceiveCredit(writer *lockedFrameWriter, window *sendWindow, streamDelta, connectionDelta uint32) error {
+	if streamDelta == 0 && connectionDelta == 0 {
+		return nil
+	}
+	streamIncrement, err := EncodeWindowUpdate(streamDelta)
+	if err != nil {
+		return err
+	}
+	connectionIncrement, err := EncodeWindowUpdate(connectionDelta)
+	if err != nil {
+		return err
+	}
+	window.grow(streamDelta, connectionDelta)
+	return writer.writeFrames(
+		Frame{Type: FrameWindowUpdate, Payload: connectionIncrement},
+		Frame{Type: FrameWindowUpdate, StreamID: ClientStreamID, Payload: streamIncrement},
+	)
+}

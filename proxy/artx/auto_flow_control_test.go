@@ -146,37 +146,48 @@ func runAutoNegotiationForTest(t *testing.T, server *Server) (uint32, RuntimeSta
 	}
 	writeFrameForTest(t, client, Frame{Type: FrameTCPSyn, StreamID: ClientStreamID, Payload: destination})
 
-	connectionUpdate, err := ReadFrame(client)
-	if err != nil {
-		t.Fatal(err)
+	// Automatic flow control hands its window out a rung at a time to a busy
+	// connection, so its handshake carries no credit at all and the scale the
+	// server settled on is read from its stats rather than off the wire. The
+	// legacy policy still grants everything up front, and over a synchronous
+	// pipe those frames have to be drained before the client can write back.
+	if !server.flowControlAuto {
+		readHandshakeCreditForTest(t, client)
 	}
-	streamUpdate, err := ReadFrame(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	increment, err := DecodeWindowUpdate(streamUpdate.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertWindowUpdateIncrement(t, connectionUpdate, 0, (InitialConnectionWindow<<scaleFromStreamIncrement(t, increment))-InitialConnectionWindow)
-	assertWindowUpdateIncrement(t, streamUpdate, ClientStreamID, increment)
-
 	writeFrameForTest(t, client, Frame{Type: FrameRST, StreamID: ClientStreamID, Payload: []byte{1}})
 	if err := <-processDone; err != nil && !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
-	return scaleFromStreamIncrement(t, increment), server.Stats()
+	stats := server.Stats()
+	return negotiatedScaleFromStats(t, stats), stats
 }
 
-func scaleFromStreamIncrement(t *testing.T, increment uint32) uint32 {
+func readHandshakeCreditForTest(t *testing.T, client io.Reader) {
 	t.Helper()
-	for scale := uint32(1); scale <= MaxWindowScale; scale++ {
-		if (InitialStreamWindow<<scale)-InitialStreamWindow == increment {
-			return scale
+	for range 2 {
+		frame, err := ReadFrame(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.Type != FrameWindowUpdate {
+			t.Fatalf("handshake frame type = %d, want WINDOW_UPDATE", frame.Type)
 		}
 	}
-	t.Fatalf("stream WINDOW_UPDATE increment %d matches no window scale", increment)
-	return 0
+}
+
+func negotiatedScaleFromStats(t *testing.T, stats RuntimeStats) uint32 {
+	t.Helper()
+	negotiated, total := uint32(0), uint64(0)
+	for scale, count := range stats.FlowControlScales {
+		if count > 0 {
+			negotiated = uint32(scale)
+			total += count
+		}
+	}
+	if total != 1 {
+		t.Fatalf("FlowControlScales = %v, want exactly one negotiation", stats.FlowControlScales)
+	}
+	return negotiated
 }
 
 func TestAutoNegotiationSizesWindowFromBDP(t *testing.T) {
