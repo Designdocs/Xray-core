@@ -1,8 +1,24 @@
 # 设计评估：ws / xhttp 传输层回落到伪装站
 
-状态：**待批准，尚未实施**
+状态：**已实现；现行版本支持每个监听器独立配置**
 目标读者：维护这个 fork 和 N2X 的人
 约束：必须遵守 [README.md](./README.md) 的「Keep the divergence additive」
+
+---
+
+## 现行方案：每个监听器独立回退
+
+公共 `StreamConfig` 的可选字段 `decoy_fallback_origin`（字段号 13），对应 JSON
+`decoyFallbackOrigin`，经 `MemoryStreamConfig` 传入 WS/XHTTP 监听器。监听器在绑定端口前
+创建自己的回退 handler：明确 URL 独立启用，明确空字符串关闭；字段缺失才保留动态读取
+旧环境变量的兼容行为。新 N2X 为每个节点下发明确值，因此不会相互影响。
+
+仍然只在 Host/Path 拒绝分支调用回退，复用现有反代地址限制、请求大小限制和超时。
+没有按 Host/端口识别节点，也没有新增全局节点注册表。只有公共 proto 需要生成，
+不分别修改 WS 和 XHTTP 的 proto。
+
+以下章节保留最初的共享环境变量方案及当时的冲突预算，作为历史记录；其中“不加字段”
+和“全进程共享”的决策已被上述方案取代。
 
 ---
 

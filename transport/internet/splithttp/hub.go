@@ -26,6 +26,7 @@ import (
 	http_proto "github.com/xtls/xray-core/common/protocol/http"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/decoyfallback"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion/bbr"
 	"github.com/xtls/xray-core/transport/internet/reality"
@@ -34,6 +35,7 @@ import (
 )
 
 type requestHandler struct {
+	fallback       http.Handler
 	config         *Config
 	host           string
 	path           string
@@ -96,13 +98,13 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
 		errors.LogInfo(context.Background(), "failed to validate host, request:", request.Host, ", config:", h.host)
-		internet.ServeDecoyOrNotFound(writer, request)
+		h.fallback.ServeHTTP(writer, request)
 		return
 	}
 
 	if !strings.HasPrefix(request.URL.Path, h.path) {
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
-		internet.ServeDecoyOrNotFound(writer, request)
+		h.fallback.ServeHTTP(writer, request)
 		return
 	}
 
@@ -430,6 +432,7 @@ func (c *httpServerConn) Close() error {
 }
 
 type Listener struct {
+	fallback *decoyfallback.Handler
 	sync.Mutex
 	server     http.Server
 	h3server   *http3.Server
@@ -441,8 +444,13 @@ type Listener struct {
 }
 
 func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSettings *internet.MemoryStreamConfig, addConn internet.ConnHandler) (internet.Listener, error) {
+	fallback, err := decoyfallback.NewHandler(streamSettings.DecoyFallbackOrigin)
+	if err != nil {
+		return nil, err
+	}
 	l := &Listener{
-		addConn: addConn,
+		fallback: fallback,
+		addConn:  addConn,
 	}
 	l.config = streamSettings.ProtocolSettings.(*Config)
 	if l.config != nil {
@@ -451,6 +459,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		}
 	}
 	handler := &requestHandler{
+		fallback:       fallback,
 		config:         l.config,
 		host:           l.config.Host,
 		path:           l.config.GetNormalizedPath(),
@@ -461,8 +470,6 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 	tlsConfig := getTLSConfig(streamSettings)
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
-
-	var err error
 	if port == net.Port(0) { // unix
 		l.listener, err = internet.ListenSystem(ctx, &net.UnixAddr{
 			Name: address.Domain(),
@@ -598,10 +605,13 @@ func (ln *Listener) Addr() net.Addr {
 
 // Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
+	defer ln.fallback.CloseIdleConnections()
 	if ln.h3server != nil {
 		return ln.h3server.Close()
 	} else if ln.listener != nil {
-		return ln.listener.Close()
+		err := ln.server.Close()
+		_ = ln.listener.Close() // Serve may not have registered the listener yet.
+		return err
 	}
 	return errors.New("listener does not have an HTTP/3 server or a net.listener")
 }

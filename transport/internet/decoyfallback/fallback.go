@@ -8,12 +8,8 @@
 // package removes it by reverse proxying those rejected requests to a decoy
 // web service running on loopback.
 //
-// Configuration arrives through the environment rather than through the
-// transport config messages on purpose: adding a field would mean editing
-// two config.proto files, regenerating both config.pb.go, and touching
-// infra/conf/transport_internet.go, which upstream rewrites constantly. The
-// environment keeps this fork's divergence to one call per rejection site.
-// See scripts/decoy-transport-fallback.md.
+// Listeners may specify an independent origin; an absent override preserves
+// the legacy environment setting, including changes after listener creation.
 package decoyfallback
 
 import (
@@ -74,7 +70,48 @@ var (
 // It always writes a response, so callers replace their WriteHeader call with
 // this one and return.
 func ServeOrNotFound(writer http.ResponseWriter, request *http.Request) {
-	proxy := lookup()
+	serveProxy(lookup(), writer, request)
+}
+
+// NewHandler resolves an explicit listener override before any socket is bound.
+// Nil keeps dynamic legacy environment behavior; empty disables it.
+func NewHandler(origin *string) (*Handler, error) {
+	if origin == nil {
+		return &Handler{legacy: true}, nil
+	}
+	var proxy *httputil.ReverseProxy
+	if *origin != "" {
+		var err error
+		proxy, err = newReverseProxy(*origin)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Handler{proxy: proxy}, nil
+}
+
+// Handler owns the reverse proxy for one listener. Legacy handlers share only
+// the environment-backed proxy and therefore never close its idle connections.
+type Handler struct {
+	proxy  *httputil.ReverseProxy
+	legacy bool
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.legacy {
+		ServeOrNotFound(w, r)
+		return
+	}
+	serveProxy(h.proxy, w, r)
+}
+
+func (h *Handler) CloseIdleConnections() {
+	if h != nil && h.proxy != nil {
+		h.proxy.Transport.(*http.Transport).CloseIdleConnections()
+	}
+}
+
+func serveProxy(proxy *httputil.ReverseProxy, writer http.ResponseWriter, request *http.Request) {
 	if proxy == nil {
 		writer.WriteHeader(http.StatusNotFound)
 		return

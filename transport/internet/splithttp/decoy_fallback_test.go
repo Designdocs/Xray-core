@@ -13,6 +13,7 @@ import (
 
 func decoyTestHandler(host, path string) *requestHandler {
 	return &requestHandler{
+		fallback:  http.HandlerFunc(decoyfallback.ServeOrNotFound),
 		config:    &Config{Path: path},
 		host:      host,
 		path:      path,

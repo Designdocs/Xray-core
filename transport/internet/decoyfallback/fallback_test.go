@@ -2,10 +2,12 @@ package decoyfallback
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests must not run in parallel: they share the package level origin cache,
@@ -277,5 +279,55 @@ func TestJoinQueries(t *testing.T) {
 		if got := JoinQueries(test.base, test.request); got != test.want {
 			t.Fatalf("JoinQueries(%q, %q) = %q, want %q", test.base, test.request, got, test.want)
 		}
+	}
+}
+
+func TestHandlerClosesOnlyItsOwnIdleConnections(t *testing.T) {
+	closed := make(chan struct{}, 2)
+	decoy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "page") }))
+	decoy.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	decoy.Start()
+	defer decoy.Close()
+	first, err := NewHandler(&decoy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewHandler(&decoy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.CloseIdleConnections()
+	for _, handler := range []*Handler{first, second} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+		if response.Code != http.StatusOK {
+			t.Fatal(response.Code)
+		}
+	}
+	first.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("first handler left its idle connection open")
+	}
+	select {
+	case <-closed:
+		t.Fatal("first handler closed another handler's connection")
+	default:
+	}
+	response := httptest.NewRecorder()
+	second.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Code)
+	}
+	second.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("second handler left its idle connection open")
 	}
 }

@@ -62,6 +62,9 @@ message StreamConfig {
   QuicParams quic_params = 12;
 
   SocketConfig socket_settings = 6;
+
+  // Absent uses the legacy environment; empty explicitly disables fallback.
+  optional string decoy_fallback_origin = 13;
 }
 
 message UdpHop {

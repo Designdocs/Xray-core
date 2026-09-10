@@ -29,12 +29,12 @@ func TestServeHTTPRejectionServesDecoy(t *testing.T) {
 	}{
 		{
 			name:    "path mismatch",
-			handler: &requestHandler{path: "/real"},
+			handler: &requestHandler{fallback: http.HandlerFunc(decoyfallback.ServeOrNotFound), path: "/real"},
 			target:  "/",
 		},
 		{
 			name:    "host mismatch",
-			handler: &requestHandler{host: "node.example", path: "/real"},
+			handler: &requestHandler{fallback: http.HandlerFunc(decoyfallback.ServeOrNotFound), host: "node.example", path: "/real"},
 			target:  "/real",
 			host:    "scanner.example",
 		},
@@ -71,7 +71,7 @@ func TestServeHTTPRejectionServesDecoy(t *testing.T) {
 func TestServeHTTPRejectionKeeps404WithoutDecoy(t *testing.T) {
 	t.Setenv(decoyfallback.OriginEnvironment, "")
 
-	handler := &requestHandler{path: "/real"}
+	handler := &requestHandler{fallback: http.HandlerFunc(decoyfallback.ServeOrNotFound), path: "/real"}
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

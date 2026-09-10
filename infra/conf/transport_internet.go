@@ -44,6 +44,7 @@ func (p TransportProtocol) Build() (string, error) {
 }
 
 type StreamConfig struct {
+	DecoyFallbackOrigin *string            `json:"decoyFallbackOrigin,omitempty"`
 	Address             *Address           `json:"address"`
 	Port                uint16             `json:"port"`
 	Method              *TransportProtocol `json:"method"`
@@ -67,8 +68,9 @@ type StreamConfig struct {
 // Build implements Buildable.
 func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 	config := &internet.StreamConfig{
-		Port:         uint32(c.Port),
-		ProtocolName: "tcp",
+		Port:                uint32(c.Port),
+		ProtocolName:        "tcp",
+		DecoyFallbackOrigin: c.DecoyFallbackOrigin,
 	}
 	if c.Address != nil {
 		config.Address = c.Address.Build()

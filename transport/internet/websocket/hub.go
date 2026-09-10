@@ -17,10 +17,12 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	http_proto "github.com/xtls/xray-core/common/protocol/http"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/decoyfallback"
 	v2tls "github.com/xtls/xray-core/transport/internet/tls"
 )
 
 type requestHandler struct {
+	fallback       http.Handler
 	host           string
 	path           string
 	ln             *Listener
@@ -41,12 +43,12 @@ var upgrader = &websocket.Upgrader{
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
 		errors.LogInfo(context.Background(), "failed to validate host, request:", request.Host, ", config:", h.host)
-		internet.ServeDecoyOrNotFound(writer, request)
+		h.fallback.ServeHTTP(writer, request)
 		return
 	}
 	if request.URL.Path != h.path {
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
-		internet.ServeDecoyOrNotFound(writer, request)
+		h.fallback.ServeHTTP(writer, request)
 		return
 	}
 
@@ -76,6 +78,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 }
 
 type Listener struct {
+	fallback *decoyfallback.Handler
 	sync.Mutex
 	server   http.Server
 	listener net.Listener
@@ -84,8 +87,13 @@ type Listener struct {
 }
 
 func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSettings *internet.MemoryStreamConfig, addConn internet.ConnHandler) (internet.Listener, error) {
+	fallback, err := decoyfallback.NewHandler(streamSettings.DecoyFallbackOrigin)
+	if err != nil {
+		return nil, err
+	}
 	l := &Listener{
-		addConn: addConn,
+		fallback: fallback,
+		addConn:  addConn,
 	}
 	wsSettings := streamSettings.ProtocolSettings.(*Config)
 	l.config = wsSettings
@@ -96,7 +104,6 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 		streamSettings.SocketSettings.AcceptProxyProtocol = l.config.AcceptProxyProtocol || streamSettings.SocketSettings.AcceptProxyProtocol
 	}
 	var listener net.Listener
-	var err error
 	if port == net.Port(0) { // unix
 		listener, err = internet.ListenSystem(ctx, &net.UnixAddr{
 			Name: address.Domain(),
@@ -135,6 +142,7 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 
 	l.server = http.Server{
 		Handler: &requestHandler{
+			fallback:       fallback,
 			host:           wsSettings.Host,
 			path:           wsSettings.GetNormalizedPath(),
 			ln:             l,
@@ -160,7 +168,10 @@ func (ln *Listener) Addr() net.Addr {
 
 // Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
-	return ln.listener.Close()
+	defer ln.fallback.CloseIdleConnections()
+	err := ln.server.Close()
+	_ = ln.listener.Close() // Serve may not have registered the listener yet.
+	return err
 }
 
 func init() {
