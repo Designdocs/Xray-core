@@ -50,8 +50,14 @@ func (c *connection) Read(b []byte) (int, error) {
 		}
 
 		nBytes, err := reader.Read(b)
+		err = normalizeReadError(err)
 		if errors.Cause(err) == io.EOF {
 			c.reader = nil
+			// A reader may return the final bytes together with EOF. Deliver
+			// them before advancing to the next WebSocket message.
+			if nBytes > 0 {
+				return nBytes, nil
+			}
 			continue
 		}
 		return nBytes, err
@@ -65,10 +71,19 @@ func (c *connection) getReader() (io.Reader, error) {
 
 	_, reader, err := c.conn.NextReader()
 	if err != nil {
-		return nil, err
+		return nil, normalizeReadError(err)
 	}
 	c.reader = reader
 	return reader, nil
+}
+
+// An orderly WebSocket shutdown is EOF, not an abort of the proxy link.
+// Returning CloseError(1000) makes the outbound discard queued final bytes.
+func normalizeReadError(err error) error {
+	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		return io.EOF
+	}
+	return err
 }
 
 // Write implements io.Writer.

@@ -3,6 +3,7 @@ package encoding
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -24,16 +25,19 @@ type StreamCloser interface {
 }
 
 type HunkReaderWriter struct {
-	hc     HunkConn
-	cancel context.CancelFunc
-	done   *done.Instance
+	hc        HunkConn
+	cancel    context.CancelFunc
+	done      *done.Instance
+	sendMu    sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
 
 	buf   []byte
 	index int
 }
 
 func NewHunkReadWriter(hc HunkConn, cancel context.CancelFunc) *HunkReaderWriter {
-	return &HunkReaderWriter{hc, cancel, done.New(), nil, 0}
+	return &HunkReaderWriter{hc: hc, cancel: cancel, done: done.New()}
 }
 
 func NewHunkConn(hc HunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
@@ -106,6 +110,8 @@ func (h *HunkReaderWriter) ReadMultiBuffer() (buf.MultiBuffer, error) {
 }
 
 func (h *HunkReaderWriter) Write(buf []byte) (int, error) {
+	h.sendMu.Lock()
+	defer h.sendMu.Unlock()
 	if h.done.Done() {
 		return 0, io.ErrClosedPipe
 	}
@@ -118,12 +124,18 @@ func (h *HunkReaderWriter) Write(buf []byte) (int, error) {
 }
 
 func (h *HunkReaderWriter) Close() error {
-	if h.cancel != nil {
-		h.cancel()
-	}
-	if sc, match := h.hc.(StreamCloser); match {
-		return sc.CloseSend()
-	}
-
-	return h.done.Close()
+	h.closeOnce.Do(func() {
+		h.done.Close()
+		// Cancel first so an in-flight Send can unblock, then serialize
+		// CloseSend with it as required by gRPC's stream contract.
+		if h.cancel != nil {
+			h.cancel()
+		}
+		h.sendMu.Lock()
+		defer h.sendMu.Unlock()
+		if sc, ok := h.hc.(StreamCloser); ok {
+			h.closeErr = sc.CloseSend()
+		}
+	})
+	return h.closeErr
 }
