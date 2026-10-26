@@ -68,7 +68,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	}
 	c.transportConfig.FillStreamRequest(req, sessionId, "")
 
-	wrc = &WaitReadCloser{Wait: make(chan struct{})}
+	wrc = &WaitReadCloser{wait: done.New()}
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -188,44 +188,35 @@ func (c *DefaultDialerClient) Close() error {
 }
 
 type WaitReadCloser struct {
-	Wait chan struct{}
-	io.ReadCloser
-
-	// settle publishes the body exactly once and orders that write against
-	// every Read and Close. The Wait channel cannot do it alone, because Close
-	// closes the channel too: a reader woken by Close would touch the field
-	// while Set is still writing it, and a torn read of a two word interface
-	// value is a crash rather than a stale answer.
-	settle sync.Once
+	wait   *done.Instance
+	reader atomic.Pointer[io.ReadCloser]
 }
 
 func (w *WaitReadCloser) Set(rc io.ReadCloser) {
-	published := false
-	w.settle.Do(func() {
-		w.ReadCloser = rc
-		published = true
-		close(w.Wait)
-	})
-	if !published {
-		// Close already ran, so nothing will ever read this body.
-		rc.Close()
+	w.reader.Store(&rc)
+	if w.wait.Done() {
+		if p := w.reader.Swap(nil); p != nil {
+			(*p).Close()
+		}
 	}
+	w.wait.Close()
 }
 
 func (w *WaitReadCloser) Read(b []byte) (int, error) {
-	// Receiving is not an optimisation to skip once the body is known to be
-	// there: it is the only edge that makes Set's write visible here.
-	<-w.Wait
-	if w.ReadCloser == nil {
-		return 0, io.ErrClosedPipe
+	rc := w.reader.Load()
+	if rc == nil {
+		<-w.wait.Wait()
+		if rc = w.reader.Load(); rc == nil {
+			return 0, io.ErrClosedPipe
+		}
 	}
-	return w.ReadCloser.Read(b)
+	return (*rc).Read(b)
 }
 
 func (w *WaitReadCloser) Close() error {
-	w.settle.Do(func() { close(w.Wait) })
-	if w.ReadCloser != nil {
-		return w.ReadCloser.Close()
+	w.wait.Close()
+	if p := w.reader.Swap(nil); p != nil {
+		return (*p).Close()
 	}
 	return nil
 }

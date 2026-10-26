@@ -15,7 +15,13 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	core "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/proxy/freedom"
+	"github.com/xtls/xray-core/proxy/masque"
+	"github.com/xtls/xray-core/proxy/vless"
+	"github.com/xtls/xray-core/proxy/vless/inbound"
+	"github.com/xtls/xray-core/proxy/vless/outbound"
 	"github.com/xtls/xray-core/transport/internet"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -34,6 +40,7 @@ var (
 		"anytls":        func() interface{} { return new(AnyTLSServerConfig) },
 		"artx":          func() interface{} { return new(ArtXServerConfig) },
 		"hysteria":      func() interface{} { return new(HysteriaServerConfig) },
+		"masque":        func() interface{} { return new(MasqueServerConfig) },
 		"tun":           func() interface{} { return new(TunConfig) },
 	}, "protocol", "settings")
 
@@ -50,6 +57,7 @@ var (
 		"vmess":       func() interface{} { return new(VMessOutboundConfig) },
 		"trojan":      func() interface{} { return new(TrojanClientConfig) },
 		"hysteria":    func() interface{} { return new(HysteriaClientConfig) },
+		"masque":      func() interface{} { return new(MasqueClientConfig) },
 		"dns":         func() interface{} { return new(DNSOutboundConfig) },
 		"wireguard":   func() interface{} { return &WireGuardConfig{IsClient: true} },
 		"tuic":        func() interface{} { return new(TuicClientConfig) },
@@ -207,6 +215,12 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
 	if err != nil {
 		return nil, errors.New("failed to build inbound handler for protocol ", c.Protocol).Base(err)
 	}
+	if _, ok := ts.(*masque.ServerConfig); !ok && receiverSettings.StreamSettings != nil && receiverSettings.StreamSettings.ProtocolName == "masque" {
+		return nil, errors.New("the masque transport can only be used by the masque inbound")
+	}
+	if err := validateXDrive(ts, receiverSettings.StreamSettings, nil, receiverSettings.PortList); err != nil {
+		return nil, err
+	}
 
 	return &core.InboundHandlerConfig{
 		Tag:              c.Tag,
@@ -221,19 +235,9 @@ type OutboundDetourConfig struct {
 	Tag            string           `json:"tag"`
 	Settings       *json.RawMessage `json:"settings"`
 	StreamSetting  *StreamConfig    `json:"streamSettings"`
-	ProxySettings  *ProxyConfig     `json:"proxySettings"`
+	ProxySettings  *json.RawMessage `json:"proxySettings"`
 	MuxSettings    *MuxConfig       `json:"mux"`
 	TargetStrategy string           `json:"targetStrategy"`
-}
-
-func (c *OutboundDetourConfig) checkChainProxyConfig() error {
-	if c.StreamSetting == nil || c.ProxySettings == nil || c.StreamSetting.SocketSettings == nil {
-		return nil
-	}
-	if len(c.ProxySettings.Tag) > 0 && len(c.StreamSetting.SocketSettings.DialerProxy) > 0 {
-		return errors.New("proxySettings.tag is conflicted with sockopt.dialerProxy").AtWarning()
-	}
-	return nil
 }
 
 func requiresTransportSecurity(address *Address) bool {
@@ -256,7 +260,7 @@ func validateOutboundTransportSecurity(rawConfig interface{}, senderSettings *pr
 		if vlessCfg.Encryption != "" && vlessCfg.Encryption != "none" {
 			return nil
 		}
-		if requiresTransportSecurity(vlessCfg.Vnext[0].Address) {
+		if requiresTransportSecurity(vlessCfg.Address) {
 			return errors.New("vless without TLS or other encryption is prohibited unless the server address is a private IP or domain")
 		}
 	}
@@ -270,8 +274,60 @@ func validateOutboundTransportSecurity(rawConfig interface{}, senderSettings *pr
 	return nil
 }
 
+// validateXDrive allows only VLESS with encryption on xdrive, and on the client Mux.Cool for every connection
+func validateXDrive(ts proto.Message, ss *internet.StreamConfig, ms *proxyman.MultiplexingConfig, pl *net.PortList) error {
+	if ss == nil || ss.ProtocolName != "xdrive" {
+		return nil
+	}
+	switch c := ts.(type) {
+	case *outbound.Config:
+		a, err := c.Vnext.User.Account.GetInstance()
+		if err != nil {
+			return err
+		}
+		account := a.(*vless.Account)
+		if account.Flow != "" {
+			return errors.New(`the xdrive transport doesn't support VLESS "flow"`)
+		}
+		if account.Encryption == "none" {
+			return errors.New(`the xdrive transport needs VLESS "encryption", run "xray vlessenc" to get one`)
+		}
+		// reverse opens its own mux
+		if account.Reverse == nil && (ms == nil || !ms.Enabled || ms.Concurrency < 0 || ms.XudpConcurrency < 0 || ms.XudpProxyUDP443 == "skip") {
+			return errors.New(`the xdrive transport needs "mux" enabled, with no negative "concurrency" or "xudpConcurrency" and no "xudpProxyUDP443":"skip"`)
+		}
+		if account.Testpre != 0 {
+			return errors.New(`the xdrive transport doesn't support VLESS "testpre"`)
+		}
+	case *inbound.Config:
+		if c.Decryption == "none" {
+			return errors.New(`the xdrive transport needs VLESS "decryption", run "xray vlessenc" to get one`)
+		}
+		for _, user := range c.Users {
+			a, err := user.Account.GetInstance()
+			if err != nil {
+				return err
+			}
+			if a.(*vless.Account).Flow != "" {
+				return errors.New(`the xdrive transport doesn't support VLESS "flow"`)
+			}
+		}
+		// every port gets its own listener on the same folder, and each of them accepts the same session
+		if pl != nil && len(pl.Ports()) != 1 {
+			return errors.New("the xdrive transport can only listen on one port")
+		}
+	default:
+		return errors.New("the xdrive transport can only be used by VLESS")
+	}
+	return nil
+}
+
 // Build implements Buildable.
 func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
+	if c.ProxySettings != nil {
+		return nil, errors.PrintRemovedFeatureError(`outbound "proxySettings"`, `"streamSettings.sockopt.dialerProxy"`)
+	}
+
 	senderSettings := &proxyman.SenderConfig{}
 	switch strings.ToLower(c.TargetStrategy) {
 	case "asis", "":
@@ -299,9 +355,6 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 	default:
 		return nil, errors.New("unsupported target domain strategy: ", c.TargetStrategy)
 	}
-	if err := c.checkChainProxyConfig(); err != nil {
-		return nil, err
-	}
 
 	if c.SendThrough != nil {
 		address := ParseSendThough(c.SendThrough)
@@ -327,26 +380,6 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 		senderSettings.StreamSettings = ss
 	}
 
-	if c.ProxySettings != nil {
-		ps, err := c.ProxySettings.Build()
-		if err != nil {
-			return nil, errors.New("invalid outbound detour proxy settings").Base(err)
-		}
-		if ps.TransportLayerProxy {
-			if senderSettings.StreamSettings != nil {
-				if senderSettings.StreamSettings.SocketSettings != nil {
-					senderSettings.StreamSettings.SocketSettings.DialerProxy = ps.Tag
-				} else {
-					senderSettings.StreamSettings.SocketSettings = &internet.SocketConfig{DialerProxy: ps.Tag}
-				}
-			} else {
-				senderSettings.StreamSettings = &internet.StreamConfig{SocketSettings: &internet.SocketConfig{DialerProxy: ps.Tag}}
-			}
-			ps = nil
-		}
-		senderSettings.ProxySettings = ps
-	}
-
 	if c.MuxSettings != nil {
 		ms, err := c.MuxSettings.Build()
 		if err != nil {
@@ -367,8 +400,40 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 	if err != nil {
 		return nil, errors.New("failed to build outbound handler for protocol ", c.Protocol).Base(err)
 	}
+	if err := validateXDrive(ts, senderSettings.StreamSettings, senderSettings.MultiplexSettings, nil); err != nil {
+		return nil, err
+	}
 	if err := validateOutboundTransportSecurity(rawConfig, senderSettings); err != nil {
 		return nil, err
+	}
+
+	if _, ok := ts.(*masque.ClientConfig); !ok && senderSettings.StreamSettings != nil && senderSettings.StreamSettings.ProtocolName == "masque" {
+		return nil, errors.New("the masque transport can only be used by the masque outbound")
+	}
+
+	if fc, ok := ts.(*freedom.Config); ok {
+		if senderSettings.StreamSettings != nil &&
+			senderSettings.StreamSettings.SocketSettings != nil &&
+			senderSettings.StreamSettings.SocketSettings.AddressPortStrategy != internet.AddressPortStrategy_None {
+			return nil, errors.New(`freedom outbound does not support "sockopt.addressPortStrategy"`)
+		}
+
+		var strategy internet.DomainStrategy
+		if strategy = senderSettings.TargetStrategy; strategy != internet.DomainStrategy_AS_IS {
+			errors.LogWarning(context.Background(), `The "outbound.targetStrategy" setting is not supported directly by freedom and has been automatically migrated to "sockopt.domainStrategy" with no behavior change.`)
+			senderSettings.TargetStrategy = internet.DomainStrategy_AS_IS
+		} else if strategy = fc.DomainStrategy; strategy != internet.DomainStrategy_AS_IS {
+			errors.LogWarning(context.Background(), `The "freedom.domainStrategy" setting is deprecated and will be removed. For compatibility, its value has been automatically migrated to "sockopt.domainStrategy". Please update your config before removal.`)
+		}
+		if strategy != internet.DomainStrategy_AS_IS {
+			if senderSettings.StreamSettings == nil {
+				senderSettings.StreamSettings = &internet.StreamConfig{}
+			}
+			if senderSettings.StreamSettings.SocketSettings == nil {
+				senderSettings.StreamSettings.SocketSettings = &internet.SocketConfig{}
+			}
+			senderSettings.StreamSettings.SocketSettings.DomainStrategy = strategy
+		}
 	}
 
 	return &core.OutboundHandlerConfig{

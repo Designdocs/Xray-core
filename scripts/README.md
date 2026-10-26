@@ -3,6 +3,33 @@
 This fork carries the ArtX protocol on top of `wyx2685/Xray-core`. These
 scripts keep that divergence cheap.
 
+## Stable baseline checked on 2026-10-26
+
+This fork now merges official XTLS/Xray-core **v26.10.21**
+(`1b1647cd9ddf0abc34b981d4611fc03bcac1ca74`) on top of the existing local
+history. The `wyx2685/Xray-core` branch currently stops at `e087e74a`, based
+on the pre-release v26.9.30; it is not the stable release selector.
+Do not treat a new commit on that branch as proof of a stable release.
+
+The stable merge retains ArtX, the wyx AnyTLS/TUIC implementations, the
+per-listener decoy fallback field, and the existing regression tests. TUIC
+uses the upstream FinalMask listener API. The pointer-based XMUX fix remains
+necessary, including for the newly introduced XDRIVE and MASQUE callers.
+Go 1.27.3 or newer is required for the updated build and certificate fixes.
+
+Go 1.27's ReverseProxy rejects CONNECT requests. ArtX now forwards only the
+bounded decoy response to its configured origin for that method; it strips hop
+headers, keeps the deadline/body limits, and never dispatches the unauthenticated
+target. Authentication-failure and response-bound regressions cover this path.
+The HTTP/2 adapter also clears connection deadlines on entry; the fallback
+connection wrapper preserves the parser deadline and the total response budget.
+The existing stalled-frame regression remains unchanged and passes under race.
+
+For a local integration before publishing the core commit, N2X uses `go.work`
+to select the sibling core source trees. Its published `go.mod` replacement
+must only be repinned after the new fork commit is available remotely. No
+push, release, or node deployment is part of this local sync.
+
 ## Cadence
 
 **Sync on every upstream release.** Upstream publishes **no git tags** — a

@@ -72,6 +72,59 @@ func TestHTTPFallbackUsesDedicatedBoundedTransport(t *testing.T) {
 	}
 }
 
+func TestHTTPFallbackConnectUsesOnlyConfiguredOrigin(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodConnect || request.Host != request.URL.Host {
+			t.Errorf("unexpected decoy request: %s %s %s", request.Method, request.Host, request.URL)
+		}
+		for _, name := range []string{"Authorization", "Proxy-Authorization", "X-Forwarded-For", "X-Hop"} {
+			if request.Header.Get(name) != "" {
+				t.Errorf("decoy received %s", name)
+			}
+		}
+		writer.Header().Set("Proxy-Authenticate", "Basic realm=private")
+		writer.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(writer, "decoy")
+	}))
+	defer origin.Close()
+	handler, err := NewHTTPFallback(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.transport.CloseIdleConnections()
+	request := httptest.NewRequest(http.MethodConnect, "https://unreachable.invalid:443", nil)
+	request.Header.Set("Authorization", "secret")
+	request.Header.Set("Proxy-Authorization", "secret")
+	request.Header.Set("X-Forwarded-For", "192.0.2.1")
+	request.Header.Set("Connection", "X-Hop")
+	request.Header.Set("X-Hop", "private")
+	writer := httptest.NewRecorder()
+	failed := false
+	handler.proxyRequest(writer, request, time.Second, true, func() { failed = true })
+	if failed || writer.Code != http.StatusMethodNotAllowed || writer.Body.String() != "decoy" || writer.Header().Get("Proxy-Authenticate") != "" {
+		t.Fatalf("response = %d %q, headers = %v, failed = %v", writer.Code, writer.Body.String(), writer.Header(), failed)
+	}
+}
+
+func TestHTTPFallbackConnectBoundsResponse(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = writer.Write(bytes.Repeat([]byte("x"), maxFallbackBodyBytes+1))
+	}))
+	defer origin.Close()
+	handler, err := NewHTTPFallback(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.transport.CloseIdleConnections()
+	writer := httptest.NewRecorder()
+	failed := false
+	handler.proxyRequest(writer, httptest.NewRequest(http.MethodConnect, "https://unreachable.invalid:443", nil), time.Second, true, func() { failed = true })
+	if !failed || writer.Code != http.StatusBadGateway {
+		t.Fatalf("oversize response = %d, failed = %v", writer.Code, failed)
+	}
+}
+
 func TestHTTPFallbackServesHTTP11FromCapturedPrefix(t *testing.T) {
 	var expectedHost string
 	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

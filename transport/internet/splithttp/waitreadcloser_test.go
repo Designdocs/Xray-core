@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/xtls/xray-core/common/signal/done"
 )
 
 type trackedReadCloser struct {
@@ -29,7 +31,7 @@ func (r *trackedReadCloser) Close() error {
 // of it is a crash rather than a stale answer.
 func TestWaitReadCloserSetRacesWithRead(t *testing.T) {
 	for range 200 {
-		waiter := &WaitReadCloser{Wait: make(chan struct{})}
+		waiter := &WaitReadCloser{wait: done.New()}
 		body := newTrackedReadCloser("payload")
 
 		var group sync.WaitGroup
@@ -57,7 +59,7 @@ func TestWaitReadCloserSetRacesWithRead(t *testing.T) {
 // relative to the response arriving.
 func TestWaitReadCloserSetRacesWithClose(t *testing.T) {
 	for range 200 {
-		waiter := &WaitReadCloser{Wait: make(chan struct{})}
+		waiter := &WaitReadCloser{wait: done.New()}
 		body := newTrackedReadCloser("payload")
 
 		var group sync.WaitGroup
@@ -83,7 +85,7 @@ func TestWaitReadCloserSetRacesWithClose(t *testing.T) {
 }
 
 func TestWaitReadCloserSetThenRead(t *testing.T) {
-	waiter := &WaitReadCloser{Wait: make(chan struct{})}
+	waiter := &WaitReadCloser{wait: done.New()}
 	waiter.Set(newTrackedReadCloser("payload"))
 
 	buffer := make([]byte, len("payload"))
@@ -96,7 +98,7 @@ func TestWaitReadCloserSetThenRead(t *testing.T) {
 }
 
 func TestWaitReadCloserCloseThenRead(t *testing.T) {
-	waiter := &WaitReadCloser{Wait: make(chan struct{})}
+	waiter := &WaitReadCloser{wait: done.New()}
 	if err := waiter.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -107,7 +109,7 @@ func TestWaitReadCloserCloseThenRead(t *testing.T) {
 }
 
 func TestWaitReadCloserCloseAfterSetClosesTheBody(t *testing.T) {
-	waiter := &WaitReadCloser{Wait: make(chan struct{})}
+	waiter := &WaitReadCloser{wait: done.New()}
 	body := newTrackedReadCloser("payload")
 	waiter.Set(body)
 
@@ -122,7 +124,7 @@ func TestWaitReadCloserCloseAfterSetClosesTheBody(t *testing.T) {
 // A response that arrives after the caller gave up has no reader left, so Set
 // owns it and must close it rather than publish it.
 func TestWaitReadCloserSetAfterCloseClosesTheBody(t *testing.T) {
-	waiter := &WaitReadCloser{Wait: make(chan struct{})}
+	waiter := &WaitReadCloser{wait: done.New()}
 	if err := waiter.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -139,7 +141,7 @@ func TestWaitReadCloserSetAfterCloseClosesTheBody(t *testing.T) {
 }
 
 func TestWaitReadCloserCloseIsIdempotent(t *testing.T) {
-	waiter := &WaitReadCloser{Wait: make(chan struct{})}
+	waiter := &WaitReadCloser{wait: done.New()}
 	body := newTrackedReadCloser("payload")
 	waiter.Set(body)
 
@@ -152,7 +154,7 @@ func TestWaitReadCloserCloseIsIdempotent(t *testing.T) {
 
 func TestWaitReadCloserConcurrentCloses(t *testing.T) {
 	for range 200 {
-		waiter := &WaitReadCloser{Wait: make(chan struct{})}
+		waiter := &WaitReadCloser{wait: done.New()}
 		waiter.Set(newTrackedReadCloser("payload"))
 
 		var group sync.WaitGroup

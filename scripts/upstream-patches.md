@@ -84,45 +84,22 @@ delete the block itself once the removal has been out for a release or two.
 
 ---
 
-### splithttp: WaitReadCloser publishes the body outside the Wait channel
+
+## Retired
+
+### splithttp: WaitReadCloser publication and close races
 
 | | |
 |---|---|
-| Ours | `044830c5` `fix(splithttp): repair two data races on the xhttp client path` |
-| Files | `transport/internet/splithttp/client.go` |
-| Tests | `waitreadcloser_test.go` (new file, keep either way) |
-| Reported upstream | **No.** Deliberate — we are not opening a PR. |
+| Ours | `044830c5` (the `client.go` half) |
+| Replaced by | Official stable `v26.10.21`, integrated 2026-10-26 |
+| Tests | `waitreadcloser_test.go` — retained, adapted to the upstream `done.Instance` constructor, and verified under `-race` |
 
-Reproducible on a clean upstream checkout with `go test -race -run Test_maxUpload
-./transport/internet/splithttp/`.
+The upstream implementation publishes the reader through an atomic pointer and
+settles waiters through `done.Instance`. Keep upstream's version. The local
+regression cases continue to cover concurrent reads, late bodies, repeated
+closes, and the response-body leak.
 
-`WaitReadCloser.Read` checked the embedded `io.ReadCloser` before receiving on
-`Wait`, which skipped the only happens-before edge that made `Set`'s write
-visible. An interface value is two words, so a torn read there is a crash.
-Introduced by `f7bd98b13` (RPRX, 2024-11-27). The same rewrite also fixed a leak
-that is independent of scheduling: a body arriving after `Close` was closed *and*
-published, so a reader could read a closed body.
-
-**Why this one will conflict:** `client.go` is on the xhttp path, which is both
-upstream's most active transport and the one our nodes lead with. Expect to
-resolve this at most syncs. `rerere` is enabled, so the second and later
-resolutions of the same shape replay automatically.
-
-**Check at each sync:**
-
-```bash
-git log --oneline HEAD..upstream/main -- \
-  transport/internet/splithttp/client.go
-```
-
-Nothing listed means upstream has not touched the file and the patch stands as
-is. If something is listed, read it before merging: upstream may have fixed the
-same defect differently, in which case take theirs and delete this entry. Our
-tests are the arbiter — they must still pass against upstream's version.
-
----
-
-## Retired
 
 ### splithttp: uploadWriter counted a buffer it had already released
 

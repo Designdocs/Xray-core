@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -224,10 +225,11 @@ func isFallbackHTTPMethod(method string) bool {
 func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection net.Conn, protocol string, prefix []byte, state *fallbackServeState, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var handlerInvoked atomic.Bool
+	var h2Connection *fallbackHTTP2Connection
 	serveHandler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		handlerInvoked.Store(true)
-		if protocol == http2.NextProtoTLS {
-			_ = connection.SetReadDeadline(deadline)
+		if h2Connection != nil {
+			_ = h2Connection.allowRequest()
 		}
 		handler.proxyRequest(writer, request, timeout, false, state.MarkFailed)
 	})
@@ -236,6 +238,7 @@ func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection ne
 		parserWindow := http2ParserWindow(timeout)
 		parserDeadline := time.Now().Add(parserWindow)
 		_ = connection.SetReadDeadline(parserDeadline)
+		h2Connection = &fallbackHTTP2Connection{Conn: buffered, readDeadline: parserDeadline, writeDeadline: deadline}
 		http2Server := &http2.Server{
 			MaxConcurrentStreams:         1,
 			MaxDecoderHeaderTableSize:    4 << 10,
@@ -248,7 +251,7 @@ func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection ne
 			MaxUploadBufferPerConnection: maxHTTP2UploadWindow,
 			MaxUploadBufferPerStream:     maxHTTP2UploadWindow,
 		}
-		http2Server.ServeConn(buffered, &http2.ServeConnOpts{
+		http2Server.ServeConn(h2Connection, &http2.ServeConnOpts{
 			Handler:    serveHandler,
 			Context:    ctx,
 			BaseConfig: &http.Server{ErrorLog: log.New(io.Discard, "", 0)},
@@ -280,6 +283,45 @@ func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection ne
 	return state.Err()
 }
 
+// Go 1.27's HTTP/2 adapter clears connection deadlines on entry. Keep the
+// parser budget until a request is parsed, then allow the remaining budget.
+type fallbackHTTP2Connection struct {
+	net.Conn
+	mu            sync.Mutex
+	readDeadline  time.Time
+	writeDeadline time.Time
+}
+
+func (c *fallbackHTTP2Connection) SetReadDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if deadline.IsZero() || deadline.After(c.readDeadline) {
+		deadline = c.readDeadline
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *fallbackHTTP2Connection) SetWriteDeadline(deadline time.Time) error {
+	if deadline.IsZero() || deadline.After(c.writeDeadline) {
+		deadline = c.writeDeadline
+	}
+	return c.Conn.SetWriteDeadline(deadline)
+}
+
+func (c *fallbackHTTP2Connection) SetDeadline(deadline time.Time) error {
+	if err := c.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	return c.SetWriteDeadline(deadline)
+}
+
+func (c *fallbackHTTP2Connection) allowRequest() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = c.writeDeadline
+	return c.Conn.SetReadDeadline(c.readDeadline)
+}
+
 func (handler *HTTPFallback) proxyRequest(writer http.ResponseWriter, request *http.Request, timeout time.Duration, stripAuthorization bool, onError func()) {
 	requestCtx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()
@@ -293,7 +335,59 @@ func (handler *HTTPFallback) proxyRequest(writer http.ResponseWriter, request *h
 		return
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxFallbackBodyBytes)
+	if request.Method == http.MethodConnect {
+		handler.proxyConnectRequest(writer, request)
+		return
+	}
 	handler.proxy.ServeHTTP(writer, request)
+}
+
+// Go 1.27's ReverseProxy rejects CONNECT. Forward its bounded decoy response
+// directly to the configured origin; this never opens a target tunnel.
+func (handler *HTTPFallback) proxyConnectRequest(writer http.ResponseWriter, request *http.Request) {
+	outbound := request.Clone(request.Context())
+	outbound.RequestURI = ""
+	outbound.URL.Opaque = ""
+	outbound.Close = true
+	handler.proxy.Rewrite(&httputil.ProxyRequest{In: request, Out: outbound})
+	outbound.URL.Path = ""
+	outbound.URL.RawPath = ""
+	outbound.URL.RawQuery = ""
+	stripFallbackHopHeaders(outbound.Header)
+	response, err := handler.transport.RoundTrip(outbound)
+	if err != nil {
+		handler.proxy.ErrorHandler(writer, outbound, err)
+		return
+	}
+	body, err := readBoundedResponse(response.Body)
+	if err != nil {
+		handler.proxy.ErrorHandler(writer, outbound, err)
+		return
+	}
+	stripFallbackHopHeaders(response.Header)
+	for name, values := range response.Header {
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.WriteHeader(response.StatusCode)
+	if _, err := writer.Write(body); err != nil {
+		fallbackObserver(request.Context()).Report()
+	}
+}
+
+func stripFallbackHopHeaders(header http.Header) {
+	for _, connection := range header.Values("Connection") {
+		for _, name := range strings.Split(connection, ",") {
+			header.Del(strings.TrimSpace(name))
+		}
+	}
+	for _, name := range []string{
+		"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
+		"Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
+		header.Del(name)
+	}
 }
 
 func http2ParserWindow(total time.Duration) time.Duration {
