@@ -3,6 +3,7 @@ package singbridge
 import (
 	"crypto/tls"
 	gonet "net"
+	"time"
 
 	singTLS "github.com/sagernet/sing/common/tls"
 )
@@ -14,7 +15,8 @@ var (
 
 // TLSConfig wraps Go's tls.Config for sing's TLS interface
 type TLSConfig struct {
-	config *tls.Config
+	config           *tls.Config
+	handshakeTimeout time.Duration
 }
 
 func NewTLSConfig(config *tls.Config) singTLS.ServerConfig {
@@ -37,6 +39,10 @@ func (c *TLSConfig) SetNextProtos(protos []string) {
 	c.config.NextProtos = protos
 }
 
+func (c *TLSConfig) HandshakeTimeout() time.Duration { return c.handshakeTimeout }
+
+func (c *TLSConfig) SetHandshakeTimeout(timeout time.Duration) { c.handshakeTimeout = timeout }
+
 func (c *TLSConfig) Config() (*tls.Config, error) {
 	return c.config, nil
 }
@@ -58,7 +64,7 @@ func (c *TLSConfig) Server(conn gonet.Conn) (singTLS.Conn, error) {
 }
 
 func (c *TLSConfig) Clone() singTLS.Config {
-	return &TLSConfig{config: c.config.Clone()}
+	return &TLSConfig{config: c.config.Clone(), handshakeTimeout: c.handshakeTimeout}
 }
 
 func (c *TLSConfig) Client(conn gonet.Conn) (singTLS.Conn, error) {
