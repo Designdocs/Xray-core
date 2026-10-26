@@ -1,6 +1,7 @@
 package reality
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/mldsa"
@@ -9,8 +10,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/xtls/reality"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/internal/compat/reality"
 	"github.com/xtls/xray-core/transport/internet"
 )
 
@@ -24,9 +25,12 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 		Dest: c.Dest,
 		Xver: byte(c.Xver),
 
-		MinClientVer: c.MinClientVer,
-		MaxClientVer: c.MaxClientVer,
-		MaxTimeDiff:  time.Duration(c.MaxTimeDiff) * time.Millisecond,
+		// An explicit zero floor is the N2X compatibility contract. Preserve
+		// upstream hybrid-only behavior for every other configuration.
+		AllowLegacyX25519: bytes.Equal(c.MinClientVer, []byte{0, 0, 0}),
+		MinClientVer:      c.MinClientVer,
+		MaxClientVer:      c.MaxClientVer,
+		MaxTimeDiff:       time.Duration(c.MaxTimeDiff) * time.Millisecond,
 
 		NextProtos:             nil, // should be nil
 		SessionTicketsDisabled: true,

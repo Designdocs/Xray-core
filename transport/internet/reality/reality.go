@@ -25,12 +25,12 @@ import (
 	"unsafe"
 
 	utls "github.com/refraction-networking/utls"
-	"github.com/xtls/reality"
 	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/internal/compat/reality"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"golang.org/x/net/http2"
 )

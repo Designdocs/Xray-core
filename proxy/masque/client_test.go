@@ -11,7 +11,7 @@ import (
 
 func newTestClient(newConn func(c *Client) splithttp.XmuxConn) *Client {
 	c := &Client{ctx: context.Background()}
-	c.xmux = splithttp.NewXmuxManager(splithttp.XmuxConfig{
+	c.xmux = splithttp.NewXmuxManager(&splithttp.XmuxConfig{
 		MaxConnections: &splithttp.RangeConfig{From: 3, To: 3},
 	}, func() splithttp.XmuxConn {
 		return newConn(c)
