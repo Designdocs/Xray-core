@@ -568,10 +568,11 @@ func (s *session) readLoop(ctx context.Context) error {
 			st := s.streams[sid]
 			s.streamsMu.Unlock()
 			if st == nil {
-				err := errors.New("anytls: received PSH for unknown stream, streamId=", sid)
+				// The outbound may finish while the peer still has data in
+				// flight. Discard that stream's tail without ending the
+				// reusable session or interrupting its other streams.
 				buf.ReleaseMulti(body)
-				s.finishStream(sid, err)
-				return nil
+				continue
 			} else if st.isUDP {
 				if err := s.handleUDPFrame(ctx, st, body); err != nil {
 					return err
@@ -584,7 +585,10 @@ func (s *session) readLoop(ctx context.Context) error {
 				continue
 			}
 			if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
-				return err
+				s.finishStream(sid, err)
+				if err := s.sendFrame(newFrame(cmdFIN, sid)); err != nil {
+					return err
+				}
 			}
 		case cmdFIN:
 			if length > 0 {
