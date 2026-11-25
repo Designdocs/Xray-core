@@ -1,7 +1,7 @@
 {
   "module": "github.com/xtls/reality",
-  "version": "v0.0.0-20261014101318-83f621788ca8",
-  "commit": "83f621788ca88b83179810b12baa7ae518aacb83",
+  "version": "v0.0.0-20261108101329-4bb46b2afd8b",
+  "commit": "4bb46b2afd8b4f1f082fbaccae34fd3c7a3f8973",
   "url": "https://github.com/XTLS/REALITY",
   "original_sha256": {
     "LICENSE": "7c1bcfe5b0a8009ffae73984bad8e3b5f6bc562f67d6d67bafb600a3b8c08c5e",
@@ -28,7 +28,7 @@
     "key_schedule.go": "514447ad70da88d9d6882cb03271cbca3557938450a627bd974f622458920a52",
     "prf.go": "d4a35c669dc328586645dd87d6c8107532891ac1d2cdeef62e36e4fc0201560c",
     "quic.go": "1d1d7ab270766b5ac4df97d07ed2578fae5d6908e6128146e1dd7c53a2a01876",
-    "record_detect.go": "5f8311ecff788125194e61594614529eafab04dc257d8ad7a1aa9308401350fa",
+    "record_detect.go": "d4d6f8f7a04914d2c09d7c58290c61813e12ff812a9e356d9c5350d6a1ec6f0a",
     "ticket.go": "aed782acec2f059c7ee79499c0b1ff85d82794c2e1dae93e809c2722973ea70e",
     "tls.go": "8a14530a620a41967e2933c35642963210278c0b42cb4bebb4e770299635fa34",
     "tls12/tls12.go": "669e113b94f3cf3b8745c20a15f0dd0342572d21716adcb58a93d96f05c8b895",

@@ -1,7 +1,7 @@
 # REALITY compatibility copy
 
-Source: XTLS/REALITY `83f621788ca88b83179810b12baa7ae518aacb83`
-(`v0.0.0-20261014101318-83f621788ca8`, Go 1.27). `UPSTREAM.json`
+Source: XTLS/REALITY `4bb46b2afd8b4f1f082fbaccae34fd3c7a3f8973`
+(`v0.0.0-20261108101329-4bb46b2afd8b`, Go 1.27). `UPSTREAM.json`
 records SHA-256 hashes of the original files. Original licenses are retained.
 Self-imports use this package path so the source is part of the pinned Xray
 module; builds do not depend on a local Go module replacement.
