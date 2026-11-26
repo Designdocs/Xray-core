@@ -59,19 +59,19 @@ func (s *server) upgrade(conn net.Conn) (stat.Connection, error) {
 	}
 
 	if s.config != nil {
-		host := req.Host
-		if len(s.config.Host) > 0 && !internet.IsValidHTTPHost(host, s.config.Host) {
-			return nil, errors.New("bad host: ", host)
-		}
 		path := s.config.GetNormalizedPath()
 		if req.URL.Path != path {
-			req.RemoteAddr = conn.RemoteAddr().String()
 			if s.wrongPath != nil && s.wrongPath(req) {
 				conn.SetWriteDeadline(time.Now().Add(time.Second * 4))
 				_, _ = io.WriteString(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
 			}
 			return nil, errors.New("bad path: ", req.URL.Path)
 		}
+		host := req.Host
+		if len(s.config.Host) > 0 && !internet.IsValidHTTPHost(host, s.config.Host) {
+			return nil, errors.New("bad host: ", host)
+		}
+
 	}
 
 	connection := strings.ToLower(req.Header.Get("Connection"))

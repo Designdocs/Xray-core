@@ -98,17 +98,18 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 }
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	wrongPath := !strings.HasPrefix(request.URL.Path, h.path)
+	if wrongPath && h.wrongPath != nil && h.wrongPath(request) {
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
 		errors.LogInfo(context.Background(), "failed to validate host, request:", request.Host, ", config:", h.host)
 		h.fallback.ServeHTTP(writer, request)
 		return
 	}
 
-	if !strings.HasPrefix(request.URL.Path, h.path) {
-		if h.wrongPath != nil && h.wrongPath(request) {
-			writer.WriteHeader(http.StatusNotFound)
-			return
-		}
+	if wrongPath {
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
 		h.fallback.ServeHTTP(writer, request)
 		return
