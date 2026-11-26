@@ -135,7 +135,7 @@ func (w *tcpWorker) Proxy() proxy.Inbound {
 
 func (w *tcpWorker) Start() error {
 	ctx := context.Background()
-	if w.stream != nil && w.stream.ProtocolName == "websocket" && w.ctx != nil {
+	if w.stream != nil && (w.stream.ProtocolName == "websocket" || w.stream.ProtocolName == "splithttp" || w.stream.ProtocolName == "httpupgrade") && w.ctx != nil {
 		ctx = session.ContextWithInbound(w.ctx, &session.Inbound{Tag: w.tag})
 	}
 

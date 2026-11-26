@@ -36,6 +36,7 @@ import (
 )
 
 type requestHandler struct {
+	wrongPath      internet.WrongPathFilter
 	fallback       http.Handler
 	config         *Config
 	host           string
@@ -104,6 +105,10 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 
 	if !strings.HasPrefix(request.URL.Path, h.path) {
+		if h.wrongPath != nil && h.wrongPath(request) {
+			writer.WriteHeader(http.StatusForbidden)
+			return
+		}
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
 		h.fallback.ServeHTTP(writer, request)
 		return
@@ -462,6 +467,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		}
 	}
 	handler := &requestHandler{
+		wrongPath:      internet.PathFilter(ctx, streamSettings),
 		fallback:       fallback,
 		config:         l.config,
 		host:           l.config.Host,

@@ -16,23 +16,14 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	http_proto "github.com/xtls/xray-core/common/protocol/http"
-	"github.com/xtls/xray-core/common/session"
+
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/decoyfallback"
 	v2tls "github.com/xtls/xray-core/transport/internet/tls"
 )
 
-// WrongPathFilter is called only for requests that miss the configured WS path.
-type WrongPathFilter func(*http.Request) bool
-type filterFactoryKey struct{}
-
-// WithWrongPathFilter installs a per-inbound filter factory for embedded servers.
-func WithWrongPathFilter(ctx context.Context, factory func(string, bool) WrongPathFilter) context.Context {
-	return context.WithValue(ctx, filterFactoryKey{}, factory)
-}
-
 type requestHandler struct {
-	wrongPath      WrongPathFilter
+	wrongPath      internet.WrongPathFilter
 	fallback       http.Handler
 	host           string
 	path           string
@@ -147,15 +138,9 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 
 	l.listener = listener
 
-	var filter WrongPathFilter
-	if factory, ok := ctx.Value(filterFactoryKey{}).(func(string, bool) WrongPathFilter); ok {
-		if inbound := session.InboundFromContext(ctx); inbound != nil {
-			filter = factory(inbound.Tag, streamSettings.SocketSettings.AcceptProxyProtocol)
-		}
-	}
 	l.server = http.Server{
 		Handler: &requestHandler{
-			wrongPath:      filter,
+			wrongPath:      internet.PathFilter(ctx, streamSettings),
 			fallback:       fallback,
 			host:           wsSettings.Host,
 			path:           wsSettings.GetNormalizedPath(),
