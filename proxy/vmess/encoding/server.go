@@ -92,14 +92,15 @@ func (h *SessionHistory) removeExpiredEntries() error {
 
 // ServerSession keeps information for a session in VMess server.
 type ServerSession struct {
-	userValidator   *vmess.TimedUserValidator
-	sessionHistory  *SessionHistory
-	requestBodyKey  [16]byte
-	requestBodyIV   [16]byte
-	responseBodyKey [16]byte
-	responseBodyIV  [16]byte
-	responseWriter  io.Writer
-	responseHeader  byte
+	RejectInvalidAuth func([]byte, io.Reader) bool
+	userValidator     *vmess.TimedUserValidator
+	sessionHistory    *SessionHistory
+	requestBodyKey    [16]byte
+	requestBodyIV     [16]byte
+	responseBodyKey   [16]byte
+	responseBodyIV    [16]byte
+	responseWriter    io.Writer
+	responseHeader    byte
 }
 
 // NewServerSession creates a new ServerSession, using the given UserValidator.
@@ -173,6 +174,9 @@ func (s *ServerSession) DecodeRequestHeader(reader io.Reader, isDrain bool) (*pr
 		}
 		decryptor = bytes.NewReader(aeadData)
 	default:
+		if s.RejectInvalidAuth != nil && s.RejectInvalidAuth(buffer.Bytes(), reader) {
+			return nil, io.EOF
+		}
 		return nil, drainConnection(errors.New("invalid user").Base(errorAEAD))
 	}
 

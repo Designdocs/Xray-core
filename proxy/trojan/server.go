@@ -2,6 +2,7 @@ package trojan
 
 import (
 	"context"
+	"github.com/xtls/xray-core/transport/internet"
 	"io"
 	"strconv"
 	"strings"
@@ -205,6 +206,9 @@ func (s *Server) Process(ctx context.Context, network net.Network, conn stat.Con
 		}
 	}
 
+	if shouldFallback && internet.RejectBufferedStream(ctx, conn, first, bufferedReader) {
+		return nil
+	}
 	if isfb && shouldFallback {
 		return s.fallback(ctx, err, sessionPolicy, conn, iConn, napfb, first, firstLen, bufferedReader)
 	} else if shouldFallback {

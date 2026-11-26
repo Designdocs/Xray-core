@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"github.com/xtls/xray-core/transport/internet"
 	"io"
 	"log"
 	"net"
@@ -226,10 +227,15 @@ func (handler *HTTPFallback) serveTransparent(ctx context.Context, connection ne
 	deadline := time.Now().Add(timeout)
 	var handlerInvoked atomic.Bool
 	var h2Connection *fallbackHTTP2Connection
+	filter := internet.SensitivePathFilter(ctx)
 	serveHandler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		handlerInvoked.Store(true)
 		if h2Connection != nil {
 			_ = h2Connection.allowRequest()
+		}
+		if filter != nil && filter(request) {
+			writer.WriteHeader(http.StatusNotFound)
+			return
 		}
 		handler.proxyRequest(writer, request, timeout, false, state.MarkFailed)
 	})

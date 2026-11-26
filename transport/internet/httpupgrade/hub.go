@@ -61,7 +61,7 @@ func (s *server) upgrade(conn net.Conn) (stat.Connection, error) {
 	if s.config != nil {
 		path := s.config.GetNormalizedPath()
 		if req.URL.Path != path {
-			if s.wrongPath != nil && s.wrongPath(req) {
+			if s.wrongPath != nil && s.wrongPath(req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, conn.LocalAddr()))) {
 				conn.SetWriteDeadline(time.Now().Add(time.Second * 4))
 				_, _ = io.WriteString(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
 			}

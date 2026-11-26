@@ -5,6 +5,7 @@ import (
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
+	"github.com/xtls/xray-core/transport/internet"
 	"io"
 	"strconv"
 	"strings"
@@ -294,6 +295,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		Buffer: buf.MultiBuffer{first},
 	}
 
+	if firstLen > 0 && first.Byte(0) != 0 && internet.RejectBufferedStream(ctx, connection, first, reader) {
+		return nil
+	}
 	var userSentID []byte // not MemoryAccount.ID
 	var request *protocol.RequestHeader
 	var requestAddons *encoding.Addons

@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"github.com/xtls/xray-core/transport/internet"
 	"io"
 	"strings"
 	"sync"
@@ -238,6 +239,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 
 	reader := &buf.BufferedReader{Reader: buf.NewReader(connection)}
 	svrSession := encoding.NewServerSession(h.clients, h.sessionHistory)
+	svrSession.RejectInvalidAuth = func(prefix []byte, rest io.Reader) bool {
+		return internet.RejectUnauthenticatedStream(ctx, connection, prefix, rest)
+	}
 	request, err := svrSession.DecodeRequestHeader(reader, isDrain)
 	if err != nil {
 		if errors.Cause(err) != io.EOF {

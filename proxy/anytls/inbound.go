@@ -18,6 +18,7 @@ import (
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
@@ -108,6 +109,9 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 	snap := s.loadStore()
 	user := snap.users[sum]
 	if user == nil {
+		if internet.RejectUnauthenticatedStream(ctx, conn, h[:], sess.br) {
+			return nil
+		}
 		authErr := errors.New("anytls: invalid user")
 		log.Record(&log.AccessMessage{From: conn.RemoteAddr(), Status: log.AccessRejected, Reason: authErr})
 		return authErr

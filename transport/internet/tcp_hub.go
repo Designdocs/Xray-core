@@ -85,7 +85,16 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, settings
 //
 // xray:api:beta
 func ListenSystem(ctx context.Context, addr net.Addr, sockopt *SocketConfig) (net.Listener, error) {
-	return effectiveListener.Listen(ctx, addr, sockopt)
+	l, err := effectiveListener.Listen(ctx, addr, sockopt)
+	if err != nil || addr.Network() != "tcp" {
+		return l, err
+	}
+	wrapped, err := wrapInboundListener(ctx, l)
+	if err != nil {
+		l.Close()
+		return nil, err
+	}
+	return wrapped, nil
 }
 
 // ListenSystemPacket listens on a local address for incoming UDP connections.

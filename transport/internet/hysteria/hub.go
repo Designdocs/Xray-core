@@ -277,6 +277,16 @@ func Listen(ctx context.Context, address net.Address, port net.Port, streamSetti
 	default:
 		return nil, errors.New("unknown masq type")
 	}
+	if filter := internet.SensitivePathFilter(ctx); filter != nil {
+		next := masqHandler
+		masqHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if filter(r) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 
 	quicParams := streamSettings.QuicParams
 	if quicParams == nil {
