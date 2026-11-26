@@ -9,6 +9,30 @@ import (
 )
 
 type proxyConnKey struct{}
+type proxyRelayKey struct{}
+
+// WithProxyRelays restricts PROXY-enabled TCP listeners to these physical peers.
+func WithProxyRelays(ctx context.Context, ranges []netip.Prefix) context.Context {
+	return context.WithValue(ctx, proxyRelayKey{}, ranges)
+}
+
+func proxyRelayPolicy(ctx context.Context) proxyproto.PolicyFunc {
+	ranges, restricted := ctx.Value(proxyRelayKey{}).([]netip.Prefix)
+	return func(peer net.Addr) (proxyproto.Policy, error) {
+		if !restricted {
+			return proxyproto.REQUIRE, nil
+		}
+		if tcp, ok := peer.(*net.TCPAddr); ok {
+			ip := tcp.AddrPort().Addr().Unmap()
+			for _, p := range ranges {
+				if p.Contains(ip) {
+					return proxyproto.REQUIRE, nil
+				}
+			}
+		}
+		return proxyproto.REJECT, proxyproto.ErrInvalidUpstream
+	}
+}
 
 // ProxyConnContext retains the actual socket without reading a header on the HTTP accept loop.
 func ProxyConnContext(ctx context.Context, c net.Conn) context.Context {
