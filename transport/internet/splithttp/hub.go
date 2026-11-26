@@ -106,7 +106,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	if !strings.HasPrefix(request.URL.Path, h.path) {
 		if h.wrongPath != nil && h.wrongPath(request) {
-			writer.WriteHeader(http.StatusForbidden)
+			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
@@ -467,7 +467,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		}
 	}
 	handler := &requestHandler{
-		wrongPath:      internet.PathFilter(ctx, streamSettings),
+		wrongPath:      internet.PathFilter(ctx),
 		fallback:       fallback,
 		config:         l.config,
 		host:           l.config.Host,
@@ -583,7 +583,6 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		protocols.SetHTTP1(true)
 		protocols.SetUnencryptedHTTP2(true)
 		l.server = http.Server{
-			ConnContext:       internet.ProxyConnContext,
 			Handler:           handler,
 			ReadHeaderTimeout: time.Second * 4,
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),

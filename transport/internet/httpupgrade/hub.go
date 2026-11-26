@@ -66,10 +66,9 @@ func (s *server) upgrade(conn net.Conn) (stat.Connection, error) {
 		path := s.config.GetNormalizedPath()
 		if req.URL.Path != path {
 			req.RemoteAddr = conn.RemoteAddr().String()
-			req = req.WithContext(internet.ProxyConnContext(req.Context(), conn))
 			if s.wrongPath != nil && s.wrongPath(req) {
 				conn.SetWriteDeadline(time.Now().Add(time.Second * 4))
-				_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+				_, _ = io.WriteString(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
 			}
 			return nil, errors.New("bad path: ", req.URL.Path)
 		}
@@ -165,7 +164,7 @@ func ListenHTTPUpgrade(ctx context.Context, address net.Address, port net.Port, 
 	}
 
 	serverInstance := &server{
-		wrongPath:      internet.PathFilter(ctx, streamSettings),
+		wrongPath:      internet.PathFilter(ctx),
 		config:         transportConfiguration,
 		addConn:        addConn,
 		innnerListener: listener,

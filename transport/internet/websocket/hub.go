@@ -44,7 +44,7 @@ var upgrader = &websocket.Upgrader{
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != h.path && h.wrongPath != nil && h.wrongPath(request) {
-		writer.WriteHeader(http.StatusForbidden)
+		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
@@ -139,9 +139,8 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 	l.listener = listener
 
 	l.server = http.Server{
-		ConnContext: internet.ProxyConnContext,
 		Handler: &requestHandler{
-			wrongPath:      internet.PathFilter(ctx, streamSettings),
+			wrongPath:      internet.PathFilter(ctx),
 			fallback:       fallback,
 			host:           wsSettings.Host,
 			path:           wsSettings.GetNormalizedPath(),
