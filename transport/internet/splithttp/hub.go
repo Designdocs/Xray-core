@@ -583,6 +583,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		protocols.SetHTTP1(true)
 		protocols.SetUnencryptedHTTP2(true)
 		l.server = http.Server{
+			ConnContext:       internet.ProxyConnContext,
 			Handler:           handler,
 			ReadHeaderTimeout: time.Second * 4,
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),

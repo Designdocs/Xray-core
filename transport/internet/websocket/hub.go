@@ -139,6 +139,7 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 	l.listener = listener
 
 	l.server = http.Server{
+		ConnContext: internet.ProxyConnContext,
 		Handler: &requestHandler{
 			wrongPath:      internet.PathFilter(ctx, streamSettings),
 			fallback:       fallback,
