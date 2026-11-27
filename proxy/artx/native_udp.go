@@ -1,7 +1,6 @@
 package artx
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -284,6 +283,7 @@ func validateNativeUDPHost(host string) error {
 }
 
 type nativeUDPDatagramStream interface {
+	// ReceiveDatagram transfers an independently owned datagram to the caller.
 	ReceiveDatagram(context.Context) ([]byte, error)
 	SendDatagram([]byte) error
 }
@@ -334,7 +334,7 @@ func relayNativeUDP(ctx context.Context, stream nativeUDPDatagramStream, dispatc
 		}
 		counters.add(runtimeCounterNativeDatagramsUp, 1)
 		counters.add(runtimeCounterNativeBytesUp, int64(len(payload)))
-		packet := buf.FromBytes(bytes.Clone(payload))
+		packet := buf.FromBytes(payload[:len(payload):len(payload)])
 		packet.UDP = &destination
 		udpDispatcher.Dispatch(relayContext, destination, packet)
 	}
