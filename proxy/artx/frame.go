@@ -64,14 +64,22 @@ func (frame Frame) MarshalBinary() ([]byte, error) {
 }
 
 func (frame Frame) marshal(wireVersion uint32) ([]byte, error) {
-	if err := validateFrameForWire(wireVersion, frame.Type, frame.StreamID, len(frame.Payload)); err != nil {
+	encoded, err := newFrameBuffer(wireVersion, frame.Type, frame.StreamID, len(frame.Payload))
+	if err != nil {
 		return nil, err
 	}
-	encoded := make([]byte, FrameHeaderLength+len(frame.Payload))
-	encoded[0] = frame.Type
-	binary.BigEndian.PutUint32(encoded[1:5], frame.StreamID)
-	putUint24(encoded[5:8], len(frame.Payload))
 	copy(encoded[FrameHeaderLength:], frame.Payload)
+	return encoded, nil
+}
+
+func newFrameBuffer(wireVersion uint32, frameType byte, streamID uint32, payloadLength int) ([]byte, error) {
+	if err := validateFrameForWire(wireVersion, frameType, streamID, payloadLength); err != nil {
+		return nil, err
+	}
+	encoded := make([]byte, FrameHeaderLength+payloadLength)
+	encoded[0] = frameType
+	binary.BigEndian.PutUint32(encoded[1:5], streamID)
+	putUint24(encoded[5:8], payloadLength)
 	return encoded, nil
 }
 

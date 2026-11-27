@@ -582,20 +582,25 @@ func (writer *lockedFrameWriter) write(frame Frame) error {
 	return writer.writeFrames(frame)
 }
 
+func (writer *lockedFrameWriter) frameBuffer(frameType byte, streamID uint32, size int) ([]byte, error) {
+	if writer.streamID != 0 && streamID == ClientStreamID {
+		streamID = writer.streamID
+	}
+	wireVersion := writer.wireVersion
+	if wireVersion == 0 {
+		wireVersion = 1
+	}
+	return newFrameBuffer(wireVersion, frameType, streamID, size)
+}
+
 func (writer *lockedFrameWriter) writeFrames(frames ...Frame) error {
 	chunks := make([][]byte, 0, len(frames))
 	for _, frame := range frames {
-		if writer.streamID != 0 && frame.StreamID == ClientStreamID {
-			frame.StreamID = writer.streamID
-		}
-		wireVersion := writer.wireVersion
-		if wireVersion == 0 {
-			wireVersion = 1
-		}
-		encoded, err := frame.marshal(wireVersion)
+		encoded, err := writer.frameBuffer(frame.Type, frame.StreamID, len(frame.Payload))
 		if err != nil {
 			return err
 		}
+		copy(encoded[FrameHeaderLength:], frame.Payload)
 		chunks = append(chunks, encoded)
 	}
 	return writer.writeChunks(chunks...)
@@ -1102,19 +1107,22 @@ func relayDownlink(ctx context.Context, writer *lockedFrameWriter, link *transpo
 		buffers, readErr := link.Reader.ReadMultiBuffer()
 		for !buffers.IsEmpty() {
 			size := min(int(buffers.Len()), MaxDataPayload)
-			payload := make([]byte, size)
-			var read int
-			buffers, read = buf.SplitBytes(buffers, payload)
-			payload = payload[:read]
-			if err := window.waitConsume(ctx, len(payload)); err != nil {
+			encoded, err := writer.frameBuffer(FrameData, ClientStreamID, size)
+			if err != nil {
 				buf.ReleaseMulti(buffers)
 				return err
 			}
-			if err := writer.write(Frame{Type: FrameData, StreamID: ClientStreamID, Payload: payload}); err != nil {
+			buffers, _ = buf.SplitBytes(buffers, encoded[FrameHeaderLength:])
+			if err := window.waitConsume(ctx, size); err != nil {
 				buf.ReleaseMulti(buffers)
 				return err
 			}
-			if err := pacer.observe(len(payload)); err != nil {
+			if err := writer.writeChunks(encoded); err != nil {
+				buf.ReleaseMulti(buffers)
+				return err
+			}
+			if err := pacer.observe(size); err != nil {
+				buf.ReleaseMulti(buffers)
 				return err
 			}
 		}
