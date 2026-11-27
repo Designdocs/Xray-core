@@ -70,6 +70,8 @@ type Outbound struct {
 	Tag string
 	// Name of the outbound proxy that handles the connection.
 	Name string
+	// ForwardTCPHalfClose requests a TCP FIN after this outbound drains its uplink.
+	ForwardTCPHalfClose bool
 	// CanSpliceCopy is a property for this connection
 	// 1 = can, 2 = after processing protocol info should be able to, 3 = cannot
 	CanSpliceCopy int

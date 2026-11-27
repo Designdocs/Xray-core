@@ -295,6 +295,13 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, connection s
 		if err != nil {
 			return err
 		}
+		// Only this single TCP stream owns the target's upload direction.
+		outbounds := session.OutboundsFromContext(ctx)
+		if len(outbounds) == 0 {
+			outbounds = []*session.Outbound{{}}
+			ctx = session.ContextWithOutbounds(ctx, outbounds)
+		}
+		outbounds[len(outbounds)-1].ForwardTCPHalfClose = true
 		link, err := dispatcher.Dispatch(ctx, destination)
 		if err != nil {
 			return fmt.Errorf("artx: dispatch: %w", err)

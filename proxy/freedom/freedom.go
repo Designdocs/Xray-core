@@ -451,6 +451,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			return errors.New("failed to process request").Base(err)
 		}
 
+		h.forwardTCPHalfClose(ob, conn)
 		return nil
 	}
 
@@ -486,6 +487,16 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	}
 
 	return nil
+}
+
+// Forward a clean upload EOF only to the direct target socket. The response
+// goroutine continues reading under the existing downlink-only timeout.
+func (h *Handler) forwardTCPHalfClose(ob *session.Outbound, conn stat.Connection) {
+	if ob.ForwardTCPHalfClose && !h.usesDialerProxy && ob.Target.Network == net.Network_TCP {
+		if tcp, ok := stat.TryUnwrapStatsConn(conn).(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+	}
 }
 
 func NewPacketReader(conn net.Conn, h *Handler, defaultRule *FinalRule, UDPOverride net.Destination, DialDest net.Destination) buf.Reader {
