@@ -77,10 +77,14 @@ func newFrameBuffer(wireVersion uint32, frameType byte, streamID uint32, payload
 		return nil, err
 	}
 	encoded := make([]byte, FrameHeaderLength+payloadLength)
+	putFrameHeader(encoded, frameType, streamID, payloadLength)
+	return encoded, nil
+}
+
+func putFrameHeader(encoded []byte, frameType byte, streamID uint32, payloadLength int) {
 	encoded[0] = frameType
 	binary.BigEndian.PutUint32(encoded[1:5], streamID)
 	putUint24(encoded[5:8], payloadLength)
-	return encoded, nil
 }
 
 func ReadFrame(reader io.Reader) (Frame, error) {

@@ -583,27 +583,32 @@ func (writer *lockedFrameWriter) write(frame Frame) error {
 }
 
 func (writer *lockedFrameWriter) frameBuffer(frameType byte, streamID uint32, size int) ([]byte, error) {
+	return newFrameBuffer(writer.wireVersion, frameType, writer.frameStreamID(streamID), size)
+}
+
+func (writer *lockedFrameWriter) frameStreamID(streamID uint32) uint32 {
 	if writer.streamID != 0 && streamID == ClientStreamID {
-		streamID = writer.streamID
+		return writer.streamID
 	}
-	wireVersion := writer.wireVersion
-	if wireVersion == 0 {
-		wireVersion = 1
-	}
-	return newFrameBuffer(wireVersion, frameType, streamID, size)
+	return streamID
 }
 
 func (writer *lockedFrameWriter) writeFrames(frames ...Frame) error {
-	chunks := make([][]byte, 0, len(frames))
-	for _, frame := range frames {
-		encoded, err := writer.frameBuffer(frame.Type, frame.StreamID, len(frame.Payload))
-		if err != nil {
+	size := 0
+	for _, f := range frames {
+		if err := validateFrameForWire(writer.wireVersion, f.Type, writer.frameStreamID(f.StreamID), len(f.Payload)); err != nil {
 			return err
 		}
-		copy(encoded[FrameHeaderLength:], frame.Payload)
-		chunks = append(chunks, encoded)
+		size += FrameHeaderLength + len(f.Payload)
 	}
-	return writer.writeChunks(chunks...)
+	encoded := make([]byte, size)
+	tail := encoded
+	for _, f := range frames {
+		putFrameHeader(tail, f.Type, writer.frameStreamID(f.StreamID), len(f.Payload))
+		copy(tail[FrameHeaderLength:], f.Payload)
+		tail = tail[FrameHeaderLength+len(f.Payload):]
+	}
+	return writer.writeChunks(encoded)
 }
 
 func (writer *lockedFrameWriter) writeChunks(chunks ...[]byte) error {
