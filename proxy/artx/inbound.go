@@ -987,30 +987,50 @@ func readUplinkFrameSource(readFrame func() (Frame, error), queue *uplinkQueue, 
 }
 
 type uplinkQueue struct {
-	mu      sync.Mutex
+	mu    sync.Mutex
+	ready sync.Cond
+	// A solitary DATA frame can be handed straight to the target. Backlogged
+	// frames are coalesced so small writes still share one window update.
+	pending []byte
 	data    bytes.Buffer
 	limit   uint32
 	fin     bool
 	stopped bool
 	err     error
-	changed chan struct{}
 }
 
 func newUplinkQueue(limit uint32) *uplinkQueue {
-	return &uplinkQueue{limit: limit, changed: make(chan struct{})}
+	queue := &uplinkQueue{limit: limit}
+	queue.ready.L = &queue.mu
+	return queue
 }
 
+// enqueue takes ownership of a payload returned by the frame reader.
 func (queue *uplinkQueue) enqueue(payload []byte) error {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 	if queue.fin {
 		return errors.New("artx: DATA after FIN")
 	}
-	if len(payload) > int(queue.limit)-queue.data.Len() {
+	used := len(queue.pending) + queue.data.Len()
+	if len(payload) > int(queue.limit)-used {
 		return errors.New("artx: uplink receive buffer overflow")
 	}
-	_, _ = queue.data.Write(payload)
-	queue.signalLocked()
+	if len(payload) == 0 {
+		return nil
+	}
+	if used == 0 && len(payload) <= MaxDataPayload {
+		queue.pending = payload
+	} else {
+		if queue.pending != nil {
+			queue.data.Write(queue.pending)
+			queue.pending = nil
+		}
+		queue.data.Write(payload)
+	}
+	if used == 0 {
+		queue.ready.Signal()
+	}
 	return nil
 }
 
@@ -1018,7 +1038,7 @@ func (queue *uplinkQueue) finish() {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 	queue.fin = true
-	queue.signalLocked()
+	queue.ready.Signal()
 }
 
 func (queue *uplinkQueue) stop(err error) {
@@ -1026,40 +1046,31 @@ func (queue *uplinkQueue) stop(err error) {
 	defer queue.mu.Unlock()
 	queue.stopped = true
 	queue.err = err
-	queue.signalLocked()
+	queue.ready.Signal()
 }
 
 func (queue *uplinkQueue) next() ([]byte, bool, error) {
-	for {
-		queue.mu.Lock()
-		if queue.stopped && queue.err != nil {
-			err := queue.err
-			queue.mu.Unlock()
-			return nil, false, err
-		}
-		if queue.data.Len() > 0 {
-			payload := bytes.Clone(queue.data.Next(min(queue.data.Len(), MaxDataPayload)))
-			queue.mu.Unlock()
-			return payload, false, nil
-		}
-		if queue.fin {
-			queue.mu.Unlock()
-			return nil, true, nil
-		}
-		if queue.stopped {
-			err := queue.err
-			queue.mu.Unlock()
-			return nil, false, err
-		}
-		changed := queue.changed
-		queue.mu.Unlock()
-		<-changed
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	for queue.pending == nil && queue.data.Len() == 0 && !queue.fin && !queue.stopped {
+		queue.ready.Wait()
 	}
-}
-
-func (queue *uplinkQueue) signalLocked() {
-	close(queue.changed)
-	queue.changed = make(chan struct{})
+	if queue.stopped && queue.err != nil {
+		return nil, false, queue.err
+	}
+	if queue.pending != nil {
+		payload := queue.pending
+		queue.pending = nil
+		return payload, false, nil
+	}
+	if queue.data.Len() > 0 {
+		payload := bytes.Clone(queue.data.Next(min(queue.data.Len(), MaxDataPayload)))
+		if queue.data.Len() == 0 && queue.data.Cap() > MaxDataPayload {
+			queue.data = bytes.Buffer{}
+		}
+		return payload, false, nil
+	}
+	return nil, queue.fin, queue.err
 }
 
 func pumpUplink(writer *lockedFrameWriter, link *transport.Link, receiveWindow *sendWindow, queue *uplinkQueue, clientFinished chan<- struct{}, pacer *windowPacer) error {

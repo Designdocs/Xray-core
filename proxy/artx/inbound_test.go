@@ -1182,3 +1182,37 @@ func closeTLSNow(connection *tls.Conn) {
 }
 
 var _ stat.Connection = (*tls.Conn)(nil)
+
+func TestUplinkQueueTransfersOwnedFramesAndBoundsBacklog(t *testing.T) {
+	q := newUplinkQueue(2 * MaxDataPayload)
+	first := bytes.Repeat([]byte{1}, MaxDataPayload)
+	if err := q.enqueue(first); err != nil {
+		t.Fatal(err)
+	}
+	owned, fin, err := q.next()
+	if err != nil || fin || len(owned) != len(first) || &owned[0] != &first[0] {
+		t.Fatal("solitary frame was not transferred")
+	}
+	for _, v := range []byte{2, 3} {
+		if err := q.enqueue(bytes.Repeat([]byte{v}, MaxDataPayload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if q.enqueue([]byte{4}) == nil {
+		t.Fatal("backlog exceeded limit")
+	}
+	q.finish()
+	for _, v := range []byte{2, 3} {
+		p, fin, err := q.next()
+		if err != nil || fin || !bytes.Equal(p, bytes.Repeat([]byte{v}, MaxDataPayload)) {
+			t.Fatal("backlog data changed")
+		}
+	}
+	_, fin, err = q.next()
+	if !fin || err != nil || q.data.Cap() > MaxDataPayload {
+		t.Fatal("backlog not drained at FIN")
+	}
+	if !bytes.Equal(owned, bytes.Repeat([]byte{1}, MaxDataPayload)) {
+		t.Fatal("delivered buffer was overwritten")
+	}
+}
